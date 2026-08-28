@@ -1,0 +1,84 @@
+import express from 'express'
+import helmet from 'helmet'
+import cors from 'cors'
+import compression from 'compression'
+import morgan from 'morgan'
+import mongoSanitize from 'express-mongo-sanitize'
+import type { Server as IOServer } from 'socket.io'
+
+import { env } from '@/config/env'
+import { apiLimiter } from '@/middlewares/rateLimiter'
+import { errorHandler } from '@/middlewares/errorHandler'
+import { logger } from '@/lib/logger'
+
+import authRoutes    from '@/modules/auth/auth.routes'
+import userRoutes    from '@/modules/users/user.routes'
+import dashboardRoutes from '@/modules/dashboard/dashboard.routes'
+import { createPatientRouter } from '@/modules/patients/patient.routes'
+import { createRecordRouter }  from '@/modules/health-records/record.routes'
+import { createPredictionRouter } from '@/modules/predictions/prediction.routes'
+import { createAlertRouter }      from '@/modules/alerts/alert.routes'
+
+export function createApp(io?: IOServer) {
+  const app = express()
+
+  // ─── Security headers ───────────────────────────────────────────
+  app.use(helmet())
+
+  // ─── CORS ───────────────────────────────────────────────────────
+  app.use(cors({
+    origin:      env.FRONTEND_URL,
+    credentials: true,
+    methods:     ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }))
+
+  // ─── Body parsing ───────────────────────────────────────────────
+  app.use(express.json({ limit: '10kb' }))
+  app.use(express.urlencoded({ extended: true, limit: '10kb' }))
+
+  // ─── Compression ────────────────────────────────────────────────
+  app.use(compression())
+
+  // ─── Sanitize NoSQL injection ────────────────────────────────────
+  app.use(mongoSanitize())
+
+  // ─── HTTP logging ────────────────────────────────────────────────
+  if (env.NODE_ENV !== 'test') {
+    app.use(morgan('dev', {
+      stream: { write: msg => logger.http(msg.trim()) },
+    }))
+  }
+
+  // ─── Rate limit ──────────────────────────────────────────────────
+  app.use('/api', apiLimiter)
+
+  // ─── Health check ────────────────────────────────────────────────
+  app.get('/health', (_req, res) => {
+    res.json({
+      status:  'ok',
+      service: 'cardiosense-api',
+      version: '1.0.0',
+      ts:      new Date().toISOString(),
+    })
+  })
+
+  // ─── Routes ──────────────────────────────────────────────────────
+  app.use('/api/auth',           authRoutes)
+  app.use('/api/users',          userRoutes)
+  app.use('/api/dashboard',      dashboardRoutes)
+  app.use('/api/patients',       createPatientRouter(io))
+  app.use('/api/health-records', createRecordRouter(io))
+  app.use('/api/predictions',    createPredictionRouter(io))
+  app.use('/api/alerts',         createAlertRouter(io))
+
+  // ─── 404 ─────────────────────────────────────────────────────────
+  app.use((_req, res) => {
+    res.status(404).json({ error: 'Route not found', code: 'NOT_FOUND' })
+  })
+
+  // ─── Global error handler ────────────────────────────────────────
+  app.use(errorHandler)
+
+  return app
+}

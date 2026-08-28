@@ -1,0 +1,42 @@
+import type { Response, NextFunction } from 'express'
+import type { AuthRequest } from '@/types'
+import type { Server as IOServer } from 'socket.io'
+import { PredictionService } from './prediction.service'
+
+export function createPredictionController(io?: IOServer) {
+  const svc = new PredictionService(io)
+
+  const predict = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const result = await svc.predict(req.user.sub, req.body)
+      res.status(201).json(result)
+    } catch (err) { next(err) }
+  }
+
+  const listByPatient = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const page  = Number(req.query.page)  || 1
+      const limit = Number(req.query.limit) || 20
+      const result = await svc.listByPatient(req.user.sub, req.params.patientId, page, limit)
+      res.json(result)
+    } catch (err) { next(err) }
+  }
+
+  const listAll = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const page  = Number(req.query.page)  || 1
+      const limit = Number(req.query.limit) || 20
+      const result = await svc.listAll(req.user.sub, page, limit)
+      res.json(result)
+    } catch (err) { next(err) }
+  }
+
+  const getOne = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const prediction = await svc.getOne(req.user.sub, req.params.id)
+      res.json(prediction)
+    } catch (err) { next(err) }
+  }
+
+  return { predict, listByPatient, listAll, getOne }
+}

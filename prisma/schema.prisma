@@ -1,0 +1,162 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  MEDICO
+  PACIENTE
+}
+
+enum RiskLevel {
+  LOW
+  MODERATE
+  HIGH
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  role         Role     @default(MEDICO)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  medico          Medico?
+  healthRecords   HealthRecord[]   @relation("CreatedByUser")
+  refreshTokens   RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+model Medico {
+  id                 String   @id @default(uuid())
+  userId             String   @unique @map("user_id")
+  cedulaProfesional  String?  @unique @map("cedula_profesional")
+  especialidad       String?
+  hospital           String?
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pacientes Paciente[]
+
+  @@map("medicos")
+}
+
+model Paciente {
+  id        String   @id @default(uuid())
+  medicoId  String   @map("medico_id")
+  firstName String   @map("first_name")
+  lastName  String   @map("last_name")
+  birthDate DateTime @map("birth_date") @db.Date
+  sex       Int      // 0 = Female, 1 = Male
+  curp      String?  @unique
+  phone     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  medico        Medico         @relation(fields: [medicoId], references: [id])
+  healthRecords HealthRecord[]
+  predictions   Prediction[]
+  alerts        Alert[]
+
+  @@index([medicoId])
+  @@map("pacientes")
+}
+
+model HealthRecord {
+  id             String   @id @default(uuid())
+  patientId      String   @map("patient_id")
+  recordedAt     DateTime @default(now()) @map("recorded_at")
+  age            Int
+  currentSmoker  Boolean  @map("current_smoker")
+  cigsPerDay     Int      @default(0) @map("cigs_per_day")
+  bpMeds         Boolean  @map("bp_meds")
+  diabetes       Boolean
+  totChol        Decimal  @map("tot_chol") @db.Decimal(6, 2)
+  sysBP          Decimal  @map("sys_bp") @db.Decimal(5, 2)
+  diaBP          Decimal  @map("dia_bp") @db.Decimal(5, 2)
+  bmi            Decimal  @db.Decimal(5, 2)
+  heartRate      Int      @map("heart_rate")
+  glucose        Decimal  @db.Decimal(6, 2)
+  notes          String?
+  createdBy      String   @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  patient     Paciente     @relation(fields: [patientId], references: [id])
+  creator     User         @relation("CreatedByUser", fields: [createdBy], references: [id])
+  predictions Prediction[]
+
+  @@index([patientId])
+  @@index([recordedAt])
+  @@map("health_records")
+}
+
+model Prediction {
+  id             String    @id @default(uuid())
+  patientId      String    @map("patient_id")
+  healthRecordId String?   @map("health_record_id")
+  riskScore      Decimal   @map("risk_score") @db.Decimal(5, 4)
+  riskLevel      RiskLevel @map("risk_level")
+  anomalyScore   Decimal?  @map("anomaly_score") @db.Decimal(8, 4)
+  isAnomaly      Boolean   @default(false) @map("is_anomaly")
+  modelVersion   String?   @map("model_version")
+  predictedAt    DateTime  @default(now()) @map("predicted_at")
+
+  patient       Paciente      @relation(fields: [patientId], references: [id])
+  healthRecord  HealthRecord? @relation(fields: [healthRecordId], references: [id])
+  alerts        Alert[]
+
+  @@index([patientId])
+  @@index([predictedAt])
+  @@map("predictions")
+}
+
+model Alert {
+  id           String        @id @default(uuid())
+  patientId    String        @map("patient_id")
+  predictionId String?       @map("prediction_id")
+  severity     AlertSeverity
+  message      String
+  isRead       Boolean       @default(false) @map("is_read")
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  patient    Paciente    @relation(fields: [patientId], references: [id])
+  prediction Prediction? @relation(fields: [predictionId], references: [id])
+
+  @@index([patientId])
+  @@index([isRead])
+  @@map("alerts")
+}
