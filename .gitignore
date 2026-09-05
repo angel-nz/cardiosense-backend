@@ -32,6 +32,7 @@ coverage/
 
 # Prisma generated artifacts
 .prisma/
+prisma/migrations/
 
 # Temporary files
 *.tmp
@@ -50,3 +51,10 @@ coverage/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Secrets / credentials
+*.pem
+*.key
+*.crt
+credentials.json
+service-account.json
