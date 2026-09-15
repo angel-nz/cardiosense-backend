@@ -44,6 +44,7 @@ model User {
   medico          Medico?
   healthRecords   HealthRecord[]   @relation("CreatedByUser")
   refreshTokens   RefreshToken[]
+  notificationPreference NotificationPreference?
 
   @@map("users")
 }
@@ -58,6 +59,19 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("refresh_tokens")
+}
+
+model NotificationPreference {
+  id             String   @id @default(uuid())
+  userId         String   @unique @map("user_id")
+  highRiskAlerts Boolean  @default(true)  @map("high_risk_alerts")
+  weeklySummary  Boolean  @default(false) @map("weekly_summary")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt      @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
 }
 
 model Medico {
