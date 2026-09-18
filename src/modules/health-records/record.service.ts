@@ -1,6 +1,8 @@
 import { prisma } from '@/config/prisma'
 import { NotFoundError, ForbiddenError } from '@/lib/errors'
+import { logger } from '@/lib/logger'
 import { HealthRecordRepository } from './record.repository'
+import { PredictionService } from '@/modules/predictions/prediction.service'
 import type { CreateRecordDtoType } from './record.dto'
 import type { Server as IOServer } from 'socket.io'
 
@@ -25,6 +27,25 @@ export class HealthRecordService {
       patientId:  record.patientId,
       recordedAt: record.recordedAt,
     })
+
+    // Q2 — automatic prediction. Deliberately NOT awaited: the HealthRecord
+    // response must never depend on AI Service availability/latency (see
+    // Q1 Decision 1). PredictionService owns 100% of the prediction logic
+    // (AI call, persistence, alerting, prediction_completed emission) —
+    // this only orchestrates the call, using the same `io` instance so the
+    // eventual prediction_completed reaches the same rooms as any manual
+    // prediction would. Errors are caught here so a failed/slow AI Service
+    // can never surface as an unhandled rejection or affect this request.
+    new PredictionService(this.io)
+      .predict(userId, { patientId: record.patientId, healthRecordId: record.id })
+      .catch(err => {
+        logger.error('Automatic prediction failed for new health record', {
+          recordId: record.id,
+          patientId: record.patientId,
+          err: err instanceof Error ? err.message : err,
+        })
+      })
+
     return record
   }
 

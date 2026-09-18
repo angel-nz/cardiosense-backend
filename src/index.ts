@@ -5,6 +5,23 @@ import { setupSocket } from '@/socket/socketServer'
 import { prisma } from '@/config/prisma'
 import { logger } from '@/lib/logger'
 
+// Q2-FIX: process-level safety net. Without this, ANY unhandled promise
+// rejection anywhere in the app — not just in the automatic-prediction
+// orchestration added in Q2 — crashes the entire Node process (Node's
+// default `--unhandled-rejections` behavior since v15 is to treat an
+// unhandled rejection as an uncaught exception). The automatic-prediction
+// call site already has its own `.catch()` (record.service.ts), so this is
+// deliberately a last-resort net, not a substitute for handling errors at
+// their source — it only logs and keeps the server alive; it never exits
+// the process, since an isolated background failure (e.g. AI Service down)
+// must never take down the whole API.
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection', { reason })
+})
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception', { err })
+})
+
 async function bootstrap() {
   // Verify DB connection
   try {

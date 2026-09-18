@@ -39,54 +39,13 @@ export async function callAIPredict(record: HealthRecord): Promise<AIPredictionR
     return data
   } catch (err) {
     logger.error('AI service error', { err })
-
-    // Fallback mock when AI service is unavailable (dev / demo mode)
-    if (env.NODE_ENV !== 'production') {
-      logger.warn('AI service unreachable — returning mock prediction')
-      return mockPrediction(record)
-    }
-
+    // Q2-FIX: no mock/heuristic fallback of any kind, in any environment.
+    // CardioSense has a real inference service (Skorp-Beta-0.1) — an
+    // unreachable/failing AI Service is a genuine inference failure, not a
+    // condition to silently paper over with a fabricated risk score. The
+    // previous dev-mode fallback here is exactly what caused a mock
+    // prediction (model_version: '1.2.0-mock') to be persisted and treated
+    // as real when the AI Service was stopped.
     throw new ServiceUnavailableError('AI prediction')
-  }
-}
-
-// ─── Mock fallback for development ───────────────────────────────────────────
-function mockPrediction(record: HealthRecord): AIPredictionResponse {
-  const sysBP    = Number(record.sysBP)
-  const totChol  = Number(record.totChol)
-  const glucose  = Number(record.glucose)
-  const age      = record.age
-  const smoker   = record.currentSmoker ? 0.1 : 0
-
-  // Simple heuristic score for demo purposes
-  let score = 0
-  if (sysBP > 140)  score += 0.25
-  if (sysBP > 160)  score += 0.15
-  if (totChol > 240) score += 0.15
-  if (glucose > 110) score += 0.10
-  if (age > 55)      score += 0.15
-  if (age > 65)      score += 0.10
-  score += smoker
-  score = Math.min(Math.max(score, 0.05), 0.98)
-
-  const risk_level = score < 0.35 ? 'low' : score < 0.65 ? 'moderate' : 'high'
-  const anomaly_score = -(Math.random() * 0.3)
-
-  return {
-    risk_score: parseFloat(score.toFixed(4)),
-    risk_level,
-    anomaly_score: parseFloat(anomaly_score.toFixed(4)),
-    is_anomaly: anomaly_score < -0.15,
-    model_version: '1.2.0-mock',
-    feature_importance: {
-      sysBP:         0.22,
-      age:           0.18,
-      totChol:       0.14,
-      BMI:           0.11,
-      glucose:       0.10,
-      heartRate:     0.08,
-      currentSmoker: 0.09,
-      diaBP:         0.08,
-    },
   }
 }

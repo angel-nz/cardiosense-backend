@@ -3,6 +3,7 @@ import { Server as IOServer } from 'socket.io'
 import { verifyAccessToken } from '@/lib/jwt'
 import { logger } from '@/lib/logger'
 import { env } from '@/config/env'
+import { prisma } from '@/config/prisma'
 
 export function setupSocket(httpServer: HTTPServer): IOServer {
   const io = new IOServer(httpServer, {
@@ -39,8 +40,28 @@ export function setupSocket(httpServer: HTTPServer): IOServer {
     void socket.join(`user:${userId}`)
 
     // Subscribe to a patient's room
-    socket.on('subscribe_patient', (patientId: string) => {
+    // Q6 — authorization fix: previously joined ANY patientId with no
+    // ownership check, so any authenticated médico could listen to
+    // health_record_created/prediction_completed for a patient belonging
+    // to a different médico. Reuses the exact ownership pattern already
+    // established in record.service.ts/patient.service.ts/prediction.service.ts
+    // (medico lookup by userId, then patient lookup scoped to that
+    // medico.id) — no new permission model introduced, just applying the
+    // one already used everywhere else in the codebase to this handler too.
+    socket.on('subscribe_patient', async (patientId: string) => {
       if (typeof patientId !== 'string') return
+      const medico = await prisma.medico.findUnique({ where: { userId } })
+      if (!medico) {
+        logger.warn(`[Socket] ${userId} rejected — no medico profile for subscribe_patient`)
+        return
+      }
+      const patient = await prisma.paciente.findFirst({
+        where: { id: patientId, medicoId: medico.id },
+      })
+      if (!patient) {
+        logger.warn(`[Socket] ${userId} rejected subscribe_patient:${patientId} — not owned by this medico`)
+        return
+      }
       void socket.join(`patient:${patientId}`)
       logger.debug(`[Socket] ${userId} subscribed to patient:${patientId}`)
     })
