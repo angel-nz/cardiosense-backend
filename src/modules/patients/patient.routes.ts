@@ -4,6 +4,7 @@ import type { Server as IOServer } from 'socket.io'
 import { authenticate } from '@/middlewares/authenticate'
 import { validate } from '@/middlewares/validate'
 import { CreatePatientDto, UpdatePatientDto, PatientQueryDto, PatientParamDto } from './patient.dto'
+import { TimelineQueryDto, TimelineParamDto } from './patient.timeline.dto'
 import { createPatientController } from './patient.controller'
 
 export function createPatientRouter(io?: IOServer) {
@@ -20,6 +21,15 @@ export function createPatientRouter(io?: IOServer) {
                           validate(UpdatePatientDto),           ctrl.update    as RequestHandler)
   router.delete('/:id',   validate(PatientParamDto, 'params'), ctrl.deactivate as RequestHandler)
   router.get('/:id/history', validate(PatientParamDto, 'params'), ctrl.getHistory as RequestHandler)
+
+  // P2 — Patient Timeline. Separate :patientId param name from the rest of
+  // this router's :id (matches the prompt's own endpoint contract,
+  // D-P1-02) — no collision with '/:id/history' above since Express
+  // matches by segment count/literal text, not param names.
+  router.get('/:patientId/timeline',
+    validate(TimelineParamDto, 'params'),
+    validate(TimelineQueryDto, 'query'),
+    ctrl.getTimeline)
 
   return router
 }

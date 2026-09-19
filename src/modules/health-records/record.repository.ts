@@ -41,4 +41,23 @@ export class HealthRecordRepository {
   async findById(id: string) {
     return prisma.healthRecord.findUnique({ where: { id } })
   }
+
+  // P2 — Patient Timeline. Filters in DB (patientId + optional [from, to)),
+  // ascending by recordedAt (the timeline's global sort order — see
+  // patient.timeline.ts::sortTimelineEvents) with a stable id tie-break so
+  // repeated requests with identical data return identical order.
+  async findInRange(patientId: string, from?: Date, to?: Date) {
+    return prisma.healthRecord.findMany({
+      where: {
+        patientId,
+        ...(from || to ? {
+          recordedAt: {
+            ...(from ? { gte: from } : {}),
+            ...(to ? { lt: to } : {}),
+          },
+        } : {}),
+      },
+      orderBy: [{ recordedAt: 'asc' }, { id: 'asc' }],
+    })
+  }
 }

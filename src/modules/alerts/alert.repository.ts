@@ -63,4 +63,23 @@ export class AlertRepository {
       include: { patient: true },
     })
   }
+
+  // P2 — Patient Timeline. Scoped by patientId (not medicoId — ownership
+  // of the patient is already verified by the caller before this runs,
+  // same pattern as HealthRecordRepository/PredictionRepository above),
+  // same [from, to) filter and asc+id ordering.
+  async findInRangeForPatient(patientId: string, from?: Date, to?: Date) {
+    return prisma.alert.findMany({
+      where: {
+        patientId,
+        ...(from || to ? {
+          createdAt: {
+            ...(from ? { gte: from } : {}),
+            ...(to ? { lt: to } : {}),
+          },
+        } : {}),
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    })
+  }
 }

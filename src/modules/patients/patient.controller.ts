@@ -1,4 +1,4 @@
-import type { Response, NextFunction } from 'express'
+import type { Request, Response, NextFunction } from 'express'
 import type { AuthRequest } from '@/types'
 import type { Server as IOServer } from 'socket.io'
 import { PatientService } from './patient.service'
@@ -49,5 +49,20 @@ export function createPatientController(io?: IOServer) {
     } catch (err) { next(err) }
   }
 
-  return { list, getOne, create, update, deactivate, getHistory }
+  // P2 — GET /patients/:patientId/timeline. Typed without an explicit
+  // AuthRequest parameter (unlike the other handlers above) specifically
+  // so it doesn't need its own `as RequestHandler` cast at the router —
+  // same technique already used for the analogous case in
+  // user.routes.ts (Bloque N-B) to avoid adding another instance of the
+  // pre-existing AuthRequest/RequestHandler TS2352 mismatch.
+  const getTimeline = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const userId = (req as AuthRequest).user.sub
+      const { from, to } = req.query as unknown as { from?: Date; to?: Date }
+      const data = await svc.getTimeline(userId, req.params.patientId, from, to)
+      res.json({ data })
+    } catch (err) { next(err) }
+  }
+
+  return { list, getOne, create, update, deactivate, getHistory, getTimeline }
 }

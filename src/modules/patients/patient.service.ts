@@ -4,8 +4,19 @@ import { PatientRepository } from './patient.repository'
 import { paginate } from '@/types'
 import type { CreatePatientDtoType, UpdatePatientDtoType, PatientQueryDtoType } from './patient.dto'
 import type { Server as IOServer } from 'socket.io'
+import { HealthRecordRepository } from '@/modules/health-records/record.repository'
+import { PredictionRepository } from '@/modules/predictions/prediction.repository'
+import { AlertRepository } from '@/modules/alerts/alert.repository'
+import {
+  toClinicalRecordEvent, toPredictionEvent, toAlertEvent,
+  deriveRiskChanges, sortTimelineEvents,
+  type PatientTimelineEvent,
+} from './patient.timeline'
 
 const repo = new PatientRepository()
+const recordRepo = new HealthRecordRepository()
+const predictionRepo = new PredictionRepository()
+const alertRepo = new AlertRepository()
 
 export class PatientService {
   constructor(private readonly io?: IOServer) {}
@@ -54,6 +65,47 @@ export class PatientService {
   async getHistory(userId: string, patientId: string, from?: string, to?: string) {
     await this.getOne(userId, patientId)
     return repo.getHistory(patientId, from, to)
+  }
+
+  // P2 — GET /patients/:patientId/timeline. Read-side aggregation only
+  // (AGGREGATED per D-P1-01) — no new table, no writes, no side effects.
+  // Ownership reuses the exact same getOne() check as getHistory() above.
+  async getTimeline(userId: string, patientId: string, from?: Date, to?: Date): Promise<PatientTimelineEvent[]> {
+    await this.getOne(userId, patientId)
+
+    // Exactly the query set from section 27: HealthRecords in range,
+    // Predictions in range, Alerts in range, and — only if `from` is
+    // given — the single predecessor Prediction for RISK_CHANGE context
+    // (section 19). No N+1: each is one query regardless of result size.
+    const [records, predictionsInRange, alerts, predecessor] = await Promise.all([
+      recordRepo.findInRange(patientId, from, to),
+      predictionRepo.findInRange(patientId, from, to),
+      alertRepo.findInRangeForPatient(patientId, from, to),
+      from ? predictionRepo.findPredecessor(patientId, from) : Promise.resolve(null),
+    ])
+
+    const clinicalEvents = records.map(toClinicalRecordEvent)
+    const predictionEvents = predictionsInRange.map(toPredictionEvent)
+    const alertEvents = alerts.map(toAlertEvent)
+
+    // The predecessor (if any) is prepended ONLY for deriving the first
+    // in-range transition — predictionsInRange is already
+    // predictedAt-asc/id-asc from the repository, and the predecessor is
+    // strictly earlier than every item in it (predictedAt < from <= every
+    // in-range predictedAt), so no re-sort is needed. It is never mapped
+    // to its own PREDICTION event (section 19/20) — only predictionEvents
+    // above (built from predictionsInRange alone) becomes PREDICTION
+    // events in the response.
+    const sequence = predecessor ? [predecessor, ...predictionsInRange] : predictionsInRange
+    const riskChangeEvents = deriveRiskChanges(sequence)
+
+    const events: PatientTimelineEvent[] = [
+      ...clinicalEvents,
+      ...predictionEvents,
+      ...alertEvents,
+      ...riskChangeEvents,
+    ]
+    return sortTimelineEvents(events)
   }
 
   private emitPatientUpdated(patient: { id: string; firstName: string; lastName: string; isActive: boolean }) {
