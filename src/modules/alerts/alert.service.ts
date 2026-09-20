@@ -59,6 +59,7 @@ export class AlertService {
       limit:    query.limit,
       unread:   query.unread,
       severity: query.severity as AlertSeverity | undefined,
+      search:   query.search,
     })
     return {
       ...paginate(data, total, query.page, query.limit),

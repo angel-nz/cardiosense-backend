@@ -11,19 +11,47 @@ export class AlertRepository {
     return prisma.alert.create({ data })
   }
 
+  // U7.2 — search is ONE of three OR branches (name tokens, CURP, alert
+  // message), always nested under the mandatory `medicoId` predicate — a
+  // foreign patient's data can never make their Alerts visible regardless
+  // of which branch matches. Doctor scoping stays a top-level AND
+  // predicate, never merely one arm of the search OR (section 6).
   async findByMedico(medicoId: string, opts: {
     page:      number
     limit:     number
     unread?:   boolean
     severity?: AlertSeverity
+    search?:   string
   }) {
-    const { page, limit, unread, severity } = opts
+    const { page, limit, unread, severity, search } = opts
     const skip = (page - 1) * limit
+
+    let searchOr: unknown[] | undefined
+    if (search) {
+      const normalized = search.replace(/\s+/g, ' ')
+      const tokens = normalized.split(' ').filter(Boolean)
+      const curpCandidate = normalized.toUpperCase()
+      searchOr = [
+        {
+          patient: {
+            AND: tokens.map(token => ({
+              OR: [
+                { firstName: { contains: token, mode: 'insensitive' as const } },
+                { lastName:  { contains: token, mode: 'insensitive' as const } },
+              ],
+            })),
+          },
+        },
+        { patient: { curp: { contains: curpCandidate } } },
+        { message: { contains: normalized, mode: 'insensitive' as const } },
+      ]
+    }
 
     const where = {
       patient: { medicoId },
       ...(unread !== undefined && { isRead: !unread }),
       ...(severity && { severity }),
+      ...(searchOr ? { OR: searchOr } : {}),
     }
 
     const [data, total] = await prisma.$transaction([
@@ -31,7 +59,7 @@ export class AlertRepository {
         where,
         skip,
         take:    limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         include: {
           patient: { select: { firstName: true, lastName: true } },
         },
