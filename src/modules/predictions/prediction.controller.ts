@@ -2,6 +2,7 @@ import type { Response, NextFunction } from 'express'
 import type { AuthRequest } from '@/types'
 import type { Server as IOServer } from 'socket.io'
 import { PredictionService } from './prediction.service'
+import type { GlobalPredictionQueryDtoType } from './prediction.dto'
 
 export function createPredictionController(io?: IOServer) {
   const svc = new PredictionService(io)
@@ -24,9 +25,8 @@ export function createPredictionController(io?: IOServer) {
 
   const listAll = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
-      const page  = Number(req.query.page)  || 1
-      const limit = Number(req.query.limit) || 20
-      const result = await svc.listAll(req.user.sub, page, limit)
+      const opts = req.query as unknown as GlobalPredictionQueryDtoType
+      const result = await svc.listAll(req.user.sub, opts)
       res.json(result)
     } catch (err) { next(err) }
   }

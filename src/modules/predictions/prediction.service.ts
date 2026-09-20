@@ -6,7 +6,7 @@ import { HealthRecordRepository } from '@/modules/health-records/record.reposito
 import { AlertService } from '@/modules/alerts/alert.service'
 import { paginate } from '@/types'
 import type { RiskLevel } from '@prisma/client'
-import type { CreatePredictionDtoType } from './prediction.dto'
+import type { CreatePredictionDtoType, GlobalPredictionQueryDtoType } from './prediction.dto'
 import type { Server as IOServer } from 'socket.io'
 
 const repo       = new PredictionRepository()
@@ -125,10 +125,10 @@ export class PredictionService {
     return paginate(data, total, page, limit)
   }
 
-  async listAll(userId: string, page: number, limit: number) {
+  async listAll(userId: string, opts: GlobalPredictionQueryDtoType) {
     const medico = await this.getMedicoOrThrow(userId)
-    const { data, total } = await repo.listAll(medico.id, page, limit)
-    return paginate(data, total, page, limit)
+    const { data, total } = await repo.listAll(medico.id, opts)
+    return paginate(data, total, opts.page, opts.limit)
   }
 
   async getOne(userId: string, predictionId: string) {

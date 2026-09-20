@@ -6,6 +6,7 @@
 //
 // Business timezone decision (closed, per Bloque I spec): America/Mexico_City.
 // Week decision (closed): Monday–Sunday (ISO 8601).
+import { z } from 'zod'
 
 export const BUSINESS_TIMEZONE = 'America/Mexico_City'
 
@@ -70,4 +71,55 @@ export function toLocalISODate(instant: Date, timeZone: string = BUSINESS_TIMEZO
   const wc = getWallClock(instant, timeZone)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${wc.year}-${pad(wc.month)}-${pad(wc.day)}`
+}
+
+// U6.2 — extracted from patient.timeline.dto.ts (P2), the only prior
+// implementation (dashboard.routes.ts already reuses TimelineQueryDto
+// verbatim rather than duplicating this logic, so no other consumer needed
+// updating for this move). ONE canonical implementation from here on;
+// behavior is byte-for-byte unchanged from the original.
+//
+// Accepts either:
+//   - a calendar date "YYYY-MM-DD", interpreted as a day boundary in the
+//     project's business timezone (America/Mexico_City);
+//   - a full ISO 8601 instant, used as-is.
+//
+// Deliberately NOT the `new Date(from)` pattern some older query params
+// still use — that accepts any string (including garbage) and silently
+// produces an `Invalid Date`. Here, an invalid value is rejected with a
+// clean 400 via Zod instead (see boundaryField).
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+
+export function parseBoundary(raw: string, edge: 'from' | 'to'): Date | null {
+  if (DATE_ONLY.test(raw)) {
+    // Anchor at noon UTC so this guess always falls on the same calendar
+    // date in America/Mexico_City (fixed UTC-6) as the literal Y-M-D,
+    // regardless of the anchor's own UTC offset from that date's local
+    // midnight — startOfLocalDay then derives the correct
+    // local-midnight-as-UTC instant from that guess.
+    const guess = new Date(`${raw}T12:00:00Z`)
+    if (isNaN(guess.getTime())) return null
+    const dayStart = startOfLocalDay(guess)
+    // `from` is inclusive of the whole calendar day → its own start.
+    // `to` is exclusive-upper (`lt`), matching the gte/lt convention used
+    // throughout this project — the start of the NEXT day makes the given
+    // day fully included without an off-by-one.
+    return edge === 'from' ? dayStart : addDays(dayStart, 1)
+  }
+  const parsed = new Date(raw)
+  return isNaN(parsed.getTime()) ? null : parsed
+}
+
+export function boundaryField(edge: 'from' | 'to') {
+  return z.string()
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined) return undefined
+      const parsed = parseBoundary(raw, edge)
+      if (!parsed) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Invalid date for "${edge}"` })
+        return z.NEVER
+      }
+      return parsed
+    })
 }
