@@ -31,10 +31,15 @@ export class HealthRecordRepository {
     })
   }
 
+  // U3.2 — added `id: 'desc'` tie-break for the (rare) case of two records
+  // sharing an identical recordedAt — previously undefined/incidental
+  // ordering for that exact tie. Safe, minimal addition; does not change
+  // behavior for the overwhelming majority of cases where recordedAt
+  // values differ.
   async findLatestByPatient(patientId: string) {
     return prisma.healthRecord.findFirst({
       where:   { patientId },
-      orderBy: { recordedAt: 'desc' },
+      orderBy: [{ recordedAt: 'desc' }, { id: 'desc' }],
     })
   }
 

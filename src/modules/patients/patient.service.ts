@@ -38,9 +38,20 @@ export class PatientService {
     return patient
   }
 
+  // U2.2 — patient_created. Invalidation-only signal, user:{userId} room
+  // (same room dashboard_activity_changed/new_alert already use, auto-
+  // joined on connect — no subscribe_patient needed). Emitted ONLY here,
+  // after successful persistence — never on update()/deactivate() (U2.1
+  // confirmed neither changes "Total pacientes", since findAll's count has
+  // no isActive filter). Payload carries just enough for the receiver to
+  // know something changed, not what — canonical refresh is GET /patients.
   async create(userId: string, dto: CreatePatientDtoType) {
     const medico = await this.getMedicoOrThrow(userId)
-    return repo.create(medico.id, dto)
+    const patient = await repo.create(medico.id, dto)
+    this.io?.to(`user:${userId}`).emit('patient_created', {
+      patientId: patient.id,
+    })
+    return patient
   }
 
   // INT-21 — patient_updated. Real contract: emitted only here and in

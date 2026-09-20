@@ -1,6 +1,7 @@
 import { prisma } from '@/config/prisma'
 import { NotFoundError, ForbiddenError } from '@/lib/errors'
 import { logger } from '@/lib/logger'
+import { calculateAge } from '@/lib/age'
 import { HealthRecordRepository } from './record.repository'
 import { PredictionService } from '@/modules/predictions/prediction.service'
 import type { CreateRecordDtoType } from './record.dto'
@@ -19,9 +20,16 @@ export class HealthRecordService {
   // frontend must refetch via the existing recordService rather than
   // fabricate missing fields client-side.
   async create(userId: string, dto: CreateRecordDtoType) {
-    // Verify patient belongs to this doctor
-    await this.assertPatientOwnership(userId, dto.patientId)
-    const record = await repo.create(userId, dto)
+    // Verify patient belongs to this doctor — now returns the owned Patient
+    // (U3.2) so age derivation below reuses it instead of a second query.
+    const patient = await this.assertPatientOwnership(userId, dto.patientId)
+    // U3.2 — age is backend-authoritative, derived from Paciente.birthDate
+    // at persistence time (this record's own observation moment — recordedAt
+    // is still server-generated `now()`, unchanged). Any `dto.age` the
+    // client might still send (now optional, kept only for legacy callers —
+    // see record.dto.ts) is always overwritten here, never trusted.
+    const age = calculateAge(patient.birthDate, new Date())
+    const record = await repo.create(userId, { ...dto, age })
     this.io?.to(`patient:${record.patientId}`).emit('health_record_created', {
       recordId:   record.id,
       patientId:  record.patientId,
@@ -74,7 +82,15 @@ export class HealthRecordService {
     return record
   }
 
-  async getLatest(patientId: string) {
+  // U3.2 — exposes the previously-unused getLatest/findLatestByPatient
+  // capability via a new route (patient.timeline-style reuse — no
+  // duplicated repository logic). Ownership was missing before (this
+  // method was dead code, never reached by any controller) — added here
+  // using the exact same pattern as every other method in this class,
+  // never trusting patientId alone. Returns `null` when the patient has no
+  // prior HealthRecord — that is a normal state, not an error.
+  async getLatest(userId: string, patientId: string) {
+    await this.assertPatientOwnership(userId, patientId)
     return repo.findLatestByPatient(patientId)
   }
 
@@ -86,5 +102,6 @@ export class HealthRecordService {
       where: { id: patientId, medicoId: medico.id },
     })
     if (!patient) throw new NotFoundError('Patient')
+    return patient
   }
 }

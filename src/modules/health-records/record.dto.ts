@@ -2,7 +2,13 @@ import { z } from 'zod'
 
 export const CreateRecordDto = z.object({
   patientId:     z.string().uuid(),
-  age:           z.number().int().min(18).max(120),
+  // U3.2 — optional (was required): age is now derived authoritatively by
+  // the backend from Paciente.birthDate at persistence time
+  // (record.service.ts::create) and always overwrites whatever value
+  // arrives here. Kept accepting the field (not rejecting it) purely for
+  // backward compatibility with any existing caller that still sends it —
+  // the value itself is never trusted.
+  age:           z.number().int().min(18).max(120).optional(),
   currentSmoker: z.boolean(),
   cigsPerDay:    z.number().int().min(0).max(100).default(0),
   bpMeds:        z.boolean(),

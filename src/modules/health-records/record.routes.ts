@@ -22,5 +22,8 @@ export function createRecordRouter(io?: IOServer) {
   // GET /health-records/patient/:patientId
   router.get('/patient/:patientId', ctrl.listByPatient as RequestHandler)
 
+  // U3.2 — GET /health-records/patient/:patientId/latest
+  router.get('/patient/:patientId/latest', ctrl.getLatest)
+
   return router
 }
