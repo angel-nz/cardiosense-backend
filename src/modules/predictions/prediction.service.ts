@@ -93,6 +93,16 @@ export class PredictionService {
       riskLevel:    aiResult.risk_level,
       isAnomaly:    aiResult.is_anomaly,
     })
+    // O4.2 — dashboard_activity_changed, for EVERY persisted Prediction
+    // (LOW/MODERATE/HIGH, anomaly or not) — never conditioned on whether
+    // an Alert was also created (O4.1 confirmed a LOW, non-anomalous
+    // Prediction never creates one, so relying on new_alert alone would
+    // silently miss it). eventDate uses the actually-persisted
+    // predictedAt, not a fresh timestamp.
+    this.io?.to(`user:${userId}`).emit('dashboard_activity_changed', {
+      patientId: dto.patientId,
+      eventDate: prediction.predictedAt,
+    })
 
     return {
       ...prediction,

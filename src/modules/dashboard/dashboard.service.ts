@@ -2,6 +2,10 @@ import { prisma } from '@/config/prisma'
 import { ForbiddenError } from '@/lib/errors'
 import { startOfLocalDay, startOfLocalWeek, addDays, toLocalISODate } from '@/lib/timezone'
 import { DashboardRepository } from './dashboard.repository'
+import {
+  toClinicalRecordEvent, toPredictionEvent, toAlertEvent, deriveRiskChanges,
+} from '@/modules/patients/patient.timeline'
+import { sortDashboardCalendarEvents, type DashboardCalendarEvent } from './dashboard.calendar'
 
 const repo = new DashboardRepository()
 
@@ -80,5 +84,70 @@ export class DashboardService {
     const medico = await prisma.medico.findUnique({ where: { userId } })
     if (!medico) throw new ForbiddenError('Only doctors can access dashboard stats')
     return medico
+  }
+
+  // O2 — GET /api/dashboard/calendar. AGGREGATED (O1/D-P1-01) across ALL of
+  // the médico's patients — no new table, no persisted TimelineEvent/RiskChange.
+  async getCalendar(userId: string, from?: Date, to?: Date): Promise<DashboardCalendarEvent[]> {
+    const medico = await this.getMedicoOrThrow(userId)
+
+    // 4 independent, medico-scoped queries in parallel (O1.18/section 30/31).
+    const [patients, records, predictionsInRange, alerts] = await Promise.all([
+      repo.findPatientIdentities(medico.id),
+      repo.findRecordsInRange(medico.id, from, to),
+      repo.findPredictionsInRange(medico.id, from, to),
+      repo.findAlertsInRange(medico.id, from, to),
+    ])
+
+    const patientNameById = new Map(patients.map(p => [p.id, `${p.firstName} ${p.lastName}`]))
+
+    // O1-FIX/section 15,17: only patients with >=1 Prediction in range need
+    // a predecessor at all — and only if `from` was actually given (no
+    // lower bound means there's no "boundary" to preserve a transition
+    // across). A 5th DB round trip is skipped entirely when there's
+    // nothing relevant to look up, rather than firing an empty/useless
+    // query.
+    const relevantPatientIds = from ? [...new Set(predictionsInRange.map(p => p.patientId))] : []
+    const predecessors = relevantPatientIds.length > 0
+      ? await repo.findPredecessors(medico.id, relevantPatientIds, from as Date)
+      : []
+
+    // Section 14 — the one rule that matters most here: NEVER derive
+    // RISK_CHANGE across a mixed, multi-patient sequence. Group each
+    // patient's own predecessor (if any) + in-range Predictions
+    // separately, run P2's unmodified deriveRiskChanges() once per group,
+    // then combine. A Prediction from patient A is never compared against
+    // one from patient B.
+    const byPatient = new Map<string, { predecessor?: typeof predecessors[number]; inRange: typeof predictionsInRange }>()
+    for (const pred of predecessors) {
+      const group = byPatient.get(pred.patientId) ?? { inRange: [] }
+      group.predecessor = pred
+      byPatient.set(pred.patientId, group)
+    }
+    for (const p of predictionsInRange) {
+      const group = byPatient.get(p.patientId) ?? { inRange: [] }
+      group.inRange.push(p)
+      byPatient.set(p.patientId, group)
+    }
+
+    const riskChangeEvents = Array.from(byPatient.values()).flatMap(group => {
+      const sequence = group.predecessor ? [group.predecessor, ...group.inRange] : group.inRange
+      return deriveRiskChanges(sequence)
+    })
+
+    const clinicalEvents = records.map(toClinicalRecordEvent)
+    const predictionEvents = predictionsInRange.map(toPredictionEvent)
+    const alertEvents = alerts.map(toAlertEvent)
+
+    // Section 34 — decorate AFTER reusing P2's mappers as-is; patientName
+    // never touches patient.timeline.ts's own types/functions.
+    const decorated: DashboardCalendarEvent[] = [
+      ...clinicalEvents, ...predictionEvents, ...alertEvents, ...riskChangeEvents,
+    ].map(event => ({
+      ...event,
+      patientName: patientNameById.get(event.patientId) ?? 'Paciente',
+    }))
+
+    return sortDashboardCalendarEvents(decorated)
   }
 }

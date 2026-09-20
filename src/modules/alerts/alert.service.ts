@@ -37,6 +37,17 @@ export class AlertService {
       riskScore:   data.riskScore,
       createdAt:   alert.createdAt,
     })
+    // O4.2 — dashboard_activity_changed. Redundant with the one
+    // prediction.service.ts already emits when this Alert was created as
+    // part of that same predict() call (the only current call site of
+    // AlertService.create()) — accepted by design (O4.1): short frontend
+    // coalescing absorbs the burst, and centralizing emission to avoid the
+    // duplicate would couple this module to whether its caller already
+    // emitted, for no real benefit.
+    this.io?.to(`user:${data.medicoUserId}`).emit('dashboard_activity_changed', {
+      patientId: data.patientId,
+      eventDate: alert.createdAt,
+    })
 
     return alert
   }

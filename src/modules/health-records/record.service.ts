@@ -27,6 +27,19 @@ export class HealthRecordService {
       patientId:  record.patientId,
       recordedAt: record.recordedAt,
     })
+    // O4.2 — dashboard_activity_changed. Invalidation-only signal for
+    // Dashboard Calendar (user:{userId} — the same room new_alert already
+    // uses, auto-joined on connect, no subscribe_patient needed). Emitted
+    // here unconditionally, before the automatic prediction below even
+    // starts, so this fires whether or not AI inference later succeeds —
+    // covering exactly the Q2-FIX gap O4.1 identified (HealthRecord
+    // persisted + AI failure + no Prediction + no Alert must still reach
+    // the Dashboard). Payload carries no timeline/metadata — receivers
+    // must do a canonical refetch, never build a CLINICAL_RECORD from this.
+    this.io?.to(`user:${userId}`).emit('dashboard_activity_changed', {
+      patientId:  record.patientId,
+      eventDate:  record.recordedAt,
+    })
 
     // Q2 — automatic prediction. Deliberately NOT awaited: the HealthRecord
     // response must never depend on AI Service availability/latency (see
