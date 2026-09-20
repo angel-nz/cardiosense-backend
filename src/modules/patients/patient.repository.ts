@@ -66,8 +66,24 @@ export class PatientRepository {
     })
   }
 
+  // U4.2A-FIX-2 — mirrors create()'s existing `new Date(dto.birthDate)`
+  // convention, which update() was missing entirely (it previously passed
+  // the raw "YYYY-MM-DD" string straight through to Prisma for a
+  // DateTime/@db.Date column). `birthDate` is destructured out first so
+  // `rest` never carries the raw string — only converted and re-added when
+  // actually present, preserving UpdatePatientDto's optional semantics
+  // (omitted → don't touch the column; the same `...rest` spread already
+  // passes `curp: null`/`phone: null` straight through unchanged when the
+  // doctor explicitly clears them).
   async update(id: string, dto: UpdatePatientDtoType) {
-    return prisma.paciente.update({ where: { id }, data: dto })
+    const { birthDate, ...rest } = dto
+    return prisma.paciente.update({
+      where: { id },
+      data: {
+        ...rest,
+        ...(birthDate !== undefined && { birthDate: new Date(birthDate) }),
+      },
+    })
   }
 
   async deactivate(id: string) {

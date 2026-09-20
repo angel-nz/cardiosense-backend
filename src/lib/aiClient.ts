@@ -14,10 +14,17 @@ const aiClient = axios.create({
   },
 })
 
-function buildFeatures(record: HealthRecord) {
+// U4.2B — sex is now the canonical Paciente.sex value, supplied by the
+// caller (PredictionService.predict(), which already fetches the owned
+// Patient for ownership verification — no new query needed here or there).
+// Encoding is already identical end-to-end (0=female/1=male, confirmed
+// against ai-service/app/schemas.py and inference.py's direct
+// `"male": req.sex` passthrough) — no conversion required, just the
+// correct source instead of the previous hardcoded 0.
+function buildFeatures(record: HealthRecord, sex: number) {
   return {
     age:           record.age,
-    sex:           0,   // Added in health record v2; default for now
+    sex,
     currentSmoker: record.currentSmoker ? 1 : 0,
     cigsPerDay:    record.cigsPerDay,
     BPMeds:        record.bpMeds ? 1 : 0,
@@ -31,9 +38,9 @@ function buildFeatures(record: HealthRecord) {
   }
 }
 
-export async function callAIPredict(record: HealthRecord): Promise<AIPredictionResponse> {
+export async function callAIPredict(record: HealthRecord, sex: number): Promise<AIPredictionResponse> {
   try {
-    const payload = buildFeatures(record)
+    const payload = buildFeatures(record, sex)
     logger.debug('Calling AI service', { payload })
     const { data } = await aiClient.post<AIPredictionResponse>('/predict', payload)
     return data

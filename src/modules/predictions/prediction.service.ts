@@ -34,7 +34,11 @@ export class PredictionService {
     if (!record) throw new NotFoundError('Health record — please create one first')
 
     // Call AI service
-    const aiResult = await callAIPredict(record)
+    // U4.2B — patient.sex (already fetched above for ownership, 0=female/
+    // 1=male, same encoding the AI service expects) replaces the previous
+    // hardcoded 0. Applies to every new prediction from here on — never
+    // touches any already-persisted Prediction row.
+    const aiResult = await callAIPredict(record, patient.sex)
 
     // Map risk level string → Prisma enum
     const riskLevelMap: Record<string, RiskLevel> = {
