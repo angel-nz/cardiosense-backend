@@ -90,19 +90,37 @@ export class PatientRepository {
     return prisma.paciente.update({ where: { id }, data: { isActive: false } })
   }
 
-  async getHistory(patientId: string, from?: string, to?: string) {
+  // U5.2 — `records` gains pagination/sorting; `predictions` (last 20,
+  // predictedAt desc) is completely unchanged — confirmed unused by the
+  // frontend's Risk Evolution (which has its own independent endpoint,
+  // GET /predictions/patient/:id), kept here only for response-contract
+  // backward compatibility, not removed. sortBy is a closed Zod-enum
+  // whitelist at the DTO layer — never arbitrary field interpolation.
+  // Deterministic `{id: 'desc'}` secondary order breaks ties on the sort
+  // column. Page is NOT clamped here — an out-of-range page legitimately
+  // returns an empty `data` array with the real `total`/`totalPages`; the
+  // frontend owns correcting its own visual page state from that.
+  async getHistory(patientId: string, opts: {
+    page: number; limit: number; sortBy: string; sortOrder: 'asc' | 'desc'; from?: string; to?: string
+  }) {
+    const { page, limit, sortBy, sortOrder, from, to } = opts
     const dateFilter = from || to ? {
       recordedAt: {
         ...(from ? { gte: new Date(from) } : {}),
         ...(to   ? { lte: new Date(to)   } : {}),
       },
     } : {}
+    const where = { patientId, ...dateFilter }
+    const skip = (page - 1) * limit
 
-    const [records, predictions] = await prisma.$transaction([
+    const [data, total, predictions] = await prisma.$transaction([
       prisma.healthRecord.findMany({
-        where: { patientId, ...dateFilter },
-        orderBy: { recordedAt: 'desc' },
+        where,
+        orderBy: [{ [sortBy]: sortOrder }, { id: 'desc' }],
+        skip,
+        take: limit,
       }),
+      prisma.healthRecord.count({ where }),
       prisma.prediction.findMany({
         where: { patientId },
         orderBy: { predictedAt: 'desc' },
@@ -110,6 +128,9 @@ export class PatientRepository {
       }),
     ])
 
-    return { records, predictions }
+    return {
+      records: { data, total, page, limit, totalPages: Math.ceil(total / limit) },
+      predictions,
+    }
   }
 }

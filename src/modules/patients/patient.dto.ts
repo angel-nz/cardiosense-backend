@@ -38,6 +38,20 @@ export const PatientParamDto = z.object({
   id: z.string().uuid('Invalid patient id'),
 })
 
+// U5.2 — GET /patients/:id/history query. Whitelist of sortBy is exact and
+// closed (z.enum) — never arbitrary field interpolation. Applies only to
+// the `records` (HealthRecord) portion of the response; `predictions`
+// (unchanged, unpaginated) is untouched by these params.
+export const HistoryQueryDto = z.object({
+  page:      z.coerce.number().int().min(1).default(1),
+  limit:     z.coerce.number().int().min(1).max(50).default(10),
+  sortBy:    z.enum(['recordedAt', 'sysBP', 'diaBP', 'totChol', 'glucose', 'bmi']).default('recordedAt'),
+  sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  from:      z.string().optional(),
+  to:        z.string().optional(),
+})
+
 export type CreatePatientDtoType = z.infer<typeof CreatePatientDto>
 export type UpdatePatientDtoType = z.infer<typeof UpdatePatientDto>
 export type PatientQueryDtoType  = z.infer<typeof PatientQueryDto>
+export type HistoryQueryDtoType  = z.infer<typeof HistoryQueryDto>

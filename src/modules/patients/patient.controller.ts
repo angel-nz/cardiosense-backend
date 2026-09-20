@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express'
 import type { AuthRequest } from '@/types'
 import type { Server as IOServer } from 'socket.io'
 import { PatientService } from './patient.service'
+import type { HistoryQueryDtoType } from './patient.dto'
 
 export function createPatientController(io?: IOServer) {
   const svc = new PatientService(io)
@@ -43,8 +44,8 @@ export function createPatientController(io?: IOServer) {
 
   const getHistory = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
-      const { from, to } = req.query as { from?: string; to?: string }
-      const history = await svc.getHistory(req.user.sub, req.params.id, from, to)
+      const opts = req.query as unknown as HistoryQueryDtoType
+      const history = await svc.getHistory(req.user.sub, req.params.id, opts)
       res.json(history)
     } catch (err) { next(err) }
   }

@@ -2,7 +2,7 @@ import { prisma } from '@/config/prisma'
 import { NotFoundError, ForbiddenError } from '@/lib/errors'
 import { PatientRepository } from './patient.repository'
 import { paginate } from '@/types'
-import type { CreatePatientDtoType, UpdatePatientDtoType, PatientQueryDtoType } from './patient.dto'
+import type { CreatePatientDtoType, UpdatePatientDtoType, PatientQueryDtoType, HistoryQueryDtoType } from './patient.dto'
 import type { Server as IOServer } from 'socket.io'
 import { HealthRecordRepository } from '@/modules/health-records/record.repository'
 import { PredictionRepository } from '@/modules/predictions/prediction.repository'
@@ -73,9 +73,9 @@ export class PatientService {
     return patient
   }
 
-  async getHistory(userId: string, patientId: string, from?: string, to?: string) {
+  async getHistory(userId: string, patientId: string, opts: HistoryQueryDtoType) {
     await this.getOne(userId, patientId)
-    return repo.getHistory(patientId, from, to)
+    return repo.getHistory(patientId, opts)
   }
 
   // P2 — GET /patients/:patientId/timeline. Read-side aggregation only
