@@ -11,6 +11,16 @@ export const PredictionQueryDto = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 })
 
+// U8.2B — GET /predictions/patient/:patientId query. Previously unvalidated
+// (manual `Number(req.query.page) || 1` parsing, same pattern U6.1 found
+// and fixed for the global endpoint) — formalized here as part of adding
+// `targetId` deep-link resolution (see prediction.repository.ts).
+export const PatientPredictionQueryDto = z.object({
+  page:     z.coerce.number().int().min(1).default(1),
+  limit:    z.coerce.number().int().min(1).max(100).default(20),
+  targetId: z.string().uuid('Invalid target id').optional(),
+})
+
 // U6.2 — GET /api/predictions global history. `search` normalization
 // (trim/whitespace-collapse/tokenization) happens in the repository, where
 // the actual Prisma predicate is built — this DTO only validates shape.
@@ -31,3 +41,4 @@ export const GlobalPredictionQueryDto = z.object({
 
 export type CreatePredictionDtoType = z.infer<typeof CreatePredictionDto>
 export type GlobalPredictionQueryDtoType = z.infer<typeof GlobalPredictionQueryDto>
+export type PatientPredictionQueryDtoType = z.infer<typeof PatientPredictionQueryDto>

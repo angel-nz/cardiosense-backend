@@ -100,10 +100,24 @@ export class PatientRepository {
   // column. Page is NOT clamped here — an out-of-range page legitimately
   // returns an empty `data` array with the real `total`/`totalPages`; the
   // frontend owns correcting its own visual page state from that.
+  // U8.2B — optional `targetId` deep-link resolution. When present, the
+  // requested `page` is IGNORED and instead resolved server-side: the
+  // target row is looked up scoped by the exact same `where` (patientId +
+  // active date filter) that the main query uses — a target excluded by
+  // that filter, belonging to another patient, or nonexistent, is
+  // reported as unavailable through the single `targetResolved: false`
+  // outcome, indistinguishable from each other (never reveals which case
+  // occurred, never fabricates the row into results). When found, the
+  // number of rows preceding it under the EXACT SAME total order as the
+  // main findMany (primary sortBy/sortOrder + secondary `id desc` — never
+  // just the primary column alone) determines its page via
+  // `floor(precedingCount / limit) + 1`. Normal callers that omit
+  // `targetId` are entirely unaffected — the extra `targetResolved` field
+  // is only ever present in the response when a `targetId` was supplied.
   async getHistory(patientId: string, opts: {
-    page: number; limit: number; sortBy: string; sortOrder: 'asc' | 'desc'; from?: string; to?: string
+    page: number; limit: number; sortBy: string; sortOrder: 'asc' | 'desc'; from?: string; to?: string; targetId?: string
   }) {
-    const { page, limit, sortBy, sortOrder, from, to } = opts
+    const { page, limit, sortBy, sortOrder, from, to, targetId } = opts
     const dateFilter = from || to ? {
       recordedAt: {
         ...(from ? { gte: new Date(from) } : {}),
@@ -111,7 +125,37 @@ export class PatientRepository {
       },
     } : {}
     const where = { patientId, ...dateFilter }
-    const skip = (page - 1) * limit
+
+    let resolvedPage = page
+    let targetResolved: boolean | undefined
+    if (targetId) {
+      const target = await prisma.healthRecord.findFirst({ where: { ...where, id: targetId } })
+      if (!target) {
+        targetResolved = false
+      } else {
+        targetResolved = true
+        const targetValue = (target as unknown as Record<string, unknown>)[sortBy]
+        // Same total order as the main findMany below: primary
+        // sortBy/sortOrder, secondary `id desc` — a row "precedes" the
+        // target under `desc` when its value is strictly greater, or tied
+        // with a strictly greater id. Under `asc`, the primary comparison
+        // flips to `lt`, but the secondary tie-break stays `id: {gt}` —
+        // it is NOT flipped, because the secondary order itself is always
+        // `id desc` regardless of the primary column's direction.
+        const precedingWhere = sortOrder === 'desc'
+          ? { OR: [
+              { [sortBy]: { gt: targetValue } },
+              { AND: [{ [sortBy]: targetValue }, { id: { gt: target.id } }] },
+            ] }
+          : { OR: [
+              { [sortBy]: { lt: targetValue } },
+              { AND: [{ [sortBy]: targetValue }, { id: { gt: target.id } }] },
+            ] }
+        const precedingCount = await prisma.healthRecord.count({ where: { ...where, ...precedingWhere } })
+        resolvedPage = Math.floor(precedingCount / limit) + 1
+      }
+    }
+    const skip = (resolvedPage - 1) * limit
 
     const [data, total, predictions] = await prisma.$transaction([
       prisma.healthRecord.findMany({
@@ -129,8 +173,9 @@ export class PatientRepository {
     ])
 
     return {
-      records: { data, total, page, limit, totalPages: Math.ceil(total / limit) },
+      records: { data, total, page: resolvedPage, limit, totalPages: Math.ceil(total / limit) },
       predictions,
+      ...(targetId !== undefined ? { targetResolved } : {}),
     }
   }
 }

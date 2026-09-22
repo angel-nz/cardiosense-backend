@@ -6,7 +6,7 @@ import { HealthRecordRepository } from '@/modules/health-records/record.reposito
 import { AlertService } from '@/modules/alerts/alert.service'
 import { paginate } from '@/types'
 import type { RiskLevel } from '@prisma/client'
-import type { CreatePredictionDtoType, GlobalPredictionQueryDtoType } from './prediction.dto'
+import type { CreatePredictionDtoType, GlobalPredictionQueryDtoType, PatientPredictionQueryDtoType } from './prediction.dto'
 import type { Server as IOServer } from 'socket.io'
 
 const repo       = new PredictionRepository()
@@ -114,15 +114,15 @@ export class PredictionService {
     }
   }
 
-  async listByPatient(userId: string, patientId: string, page: number, limit: number) {
+  async listByPatient(userId: string, patientId: string, opts: PatientPredictionQueryDtoType) {
     const medico = await this.getMedicoOrThrow(userId)
     const patient = await prisma.paciente.findFirst({
       where: { id: patientId, medicoId: medico.id },
     })
     if (!patient) throw new NotFoundError('Patient')
 
-    const { data, total } = await repo.findByPatient(patientId, page, limit)
-    return paginate(data, total, page, limit)
+    const { data, total, page, targetResolved } = await repo.findByPatient(patientId, opts)
+    return { ...paginate(data, total, page, opts.limit), ...(opts.targetId !== undefined ? { targetResolved } : {}) }
   }
 
   async listAll(userId: string, opts: GlobalPredictionQueryDtoType) {

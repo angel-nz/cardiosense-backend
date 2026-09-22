@@ -49,6 +49,12 @@ export const HistoryQueryDto = z.object({
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
   from:      z.string().optional(),
   to:        z.string().optional(),
+  // U8.2B — optional deep-link target resolution. When present, the
+  // backend ignores the client's own `page` and instead resolves which
+  // page actually contains this HealthRecord under the current
+  // sortBy/sortOrder/filters, returning that page instead. Normal callers
+  // that omit this continue getting exactly the pre-existing behavior.
+  targetId:  z.string().uuid('Invalid target id').optional(),
 })
 
 export type CreatePatientDtoType = z.infer<typeof CreatePatientDto>

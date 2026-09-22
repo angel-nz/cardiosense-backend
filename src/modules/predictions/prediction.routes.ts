@@ -3,7 +3,7 @@ import type { RequestHandler } from 'express'
 import type { Server as IOServer } from 'socket.io'
 import { authenticate } from '@/middlewares/authenticate'
 import { validate } from '@/middlewares/validate'
-import { CreatePredictionDto, GlobalPredictionQueryDto } from './prediction.dto'
+import { CreatePredictionDto, GlobalPredictionQueryDto, PatientPredictionQueryDto } from './prediction.dto'
 import { createPredictionController } from './prediction.controller'
 
 export function createPredictionRouter(io?: IOServer) {
@@ -26,7 +26,9 @@ export function createPredictionRouter(io?: IOServer) {
   router.get('/:id', ctrl.getOne as RequestHandler)
 
   // GET  /predictions/patient/:patientId
-  router.get('/patient/:patientId', ctrl.listByPatient as RequestHandler)
+  // U8.2B — now validated (was previously unvalidated manual parsing);
+  // added optional targetId deep-link resolution.
+  router.get('/patient/:patientId', validate(PatientPredictionQueryDto, 'query'), ctrl.listByPatient as RequestHandler)
 
   return router
 }

@@ -14,18 +14,53 @@ export class PredictionRepository {
     return prisma.prediction.create({ data })
   }
 
-  async findByPatient(patientId: string, page: number, limit: number) {
-    const skip = (page - 1) * limit
+  // U8.2B — added deterministic `id desc` secondary tie-break (previously
+  // only `predictedAt desc` — a minor inconsistency versus every other
+  // paginated module in this project, harmless before but now load-bearing
+  // for the total-order target-page resolution below to be well-defined).
+  // Optional `targetId`: same resolution principle as
+  // patient.repository.ts::getHistory — when present, `page` is ignored
+  // and instead resolved by counting Predictions that precede the target
+  // under this EXACT total order (predictedAt desc, id desc). A target
+  // that doesn't exist or belongs to another patient is reported through
+  // the single `targetResolved: false` outcome, never fabricated into
+  // results. Normal callers omitting `targetId` are entirely unaffected.
+  async findByPatient(patientId: string, opts: { page: number; limit: number; targetId?: string }) {
+    const { page, limit, targetId } = opts
+    const where = { patientId }
+
+    let resolvedPage = page
+    let targetResolved: boolean | undefined
+    if (targetId) {
+      const target = await prisma.prediction.findFirst({ where: { ...where, id: targetId } })
+      if (!target) {
+        targetResolved = false
+      } else {
+        targetResolved = true
+        const precedingCount = await prisma.prediction.count({
+          where: {
+            ...where,
+            OR: [
+              { predictedAt: { gt: target.predictedAt } },
+              { AND: [{ predictedAt: target.predictedAt }, { id: { gt: target.id } }] },
+            ],
+          },
+        })
+        resolvedPage = Math.floor(precedingCount / limit) + 1
+      }
+    }
+    const skip = (resolvedPage - 1) * limit
+
     const [data, total] = await prisma.$transaction([
       prisma.prediction.findMany({
-        where:   { patientId },
-        orderBy: { predictedAt: 'desc' },
+        where,
+        orderBy: [{ predictedAt: 'desc' }, { id: 'desc' }],
         skip,
         take:    limit,
       }),
-      prisma.prediction.count({ where: { patientId } }),
+      prisma.prediction.count({ where }),
     ])
-    return { data, total }
+    return { data, total, page: resolvedPage, targetResolved }
   }
 
   async findById(id: string) {
