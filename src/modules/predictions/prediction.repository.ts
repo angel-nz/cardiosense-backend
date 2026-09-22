@@ -1,5 +1,5 @@
 import { prisma } from '@/config/prisma'
-import type { RiskLevel } from '@prisma/client'
+import type { RiskLevel, Prisma } from '@prisma/client'
 
 export class PredictionRepository {
   async create(data: {
@@ -90,7 +90,7 @@ export class PredictionRepository {
     const { page, limit, search, from, to, riskLevel } = opts
     const skip = (page - 1) * limit
 
-    const patientWhere: { medicoId: string; OR?: unknown[] } = { medicoId }
+    const patientWhere: Prisma.PacienteWhereInput = { medicoId }
     if (search) {
       // Collapse repeated internal whitespace (already trimmed by the DTO).
       const normalized = search.replace(/\s+/g, ' ')
