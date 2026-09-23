@@ -1,8 +1,13 @@
 import { prisma } from '@/config/prisma'
 import type { CreateRecordDtoType } from './record.dto'
 
+// Persistence input: `age` is required here because the service derives it
+// from Paciente.birthDate before calling create() (record.service.ts). The
+// HTTP DTO keeps `age` optional and never trusts a client-sent value.
+type CreateHealthRecordData = Omit<CreateRecordDtoType, 'age'> & { age: number }
+
 export class HealthRecordRepository {
-  async create(userId: string, dto: CreateRecordDtoType) {
+  async create(userId: string, dto: CreateHealthRecordData) {
     return prisma.healthRecord.create({
       data: {
         patientId:     dto.patientId,

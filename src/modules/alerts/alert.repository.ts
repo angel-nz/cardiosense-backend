@@ -1,5 +1,5 @@
 import { prisma } from '@/config/prisma'
-import type { AlertSeverity } from '@prisma/client'
+import type { AlertSeverity, Prisma } from '@prisma/client'
 
 export class AlertRepository {
   async create(data: {
@@ -26,7 +26,7 @@ export class AlertRepository {
     const { page, limit, unread, severity, search } = opts
     const skip = (page - 1) * limit
 
-    let searchOr: unknown[] | undefined
+    let searchOr: Prisma.AlertWhereInput[] | undefined
     if (search) {
       const normalized = search.replace(/\s+/g, ' ')
       const tokens = normalized.split(' ').filter(Boolean)
