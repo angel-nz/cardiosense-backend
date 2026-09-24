@@ -1,7 +1,7 @@
 import { Router } from 'express'
-import type { RequestHandler, Response, NextFunction } from 'express'
+import type { Response, NextFunction } from 'express'
 import { z } from 'zod'
-import { authenticate } from '@/middlewares/authenticate'
+import { authenticate, withAuth } from '@/middlewares/authenticate'
 import { authorize } from '@/middlewares/authorize'
 import { validate } from '@/middlewares/validate'
 import { prisma } from '@/config/prisma'
@@ -9,12 +9,12 @@ import { NotFoundError } from '@/lib/errors'
 import type { AuthRequest } from '@/types'
 
 const router = Router()
-const auth   = authenticate as RequestHandler
+const auth   = authenticate
 
 // GET /users — admin only
 router.get('/',
   auth,
-  authorize('ADMIN') as RequestHandler,
+  authorize('ADMIN'),
   async (_req, res: Response, next: NextFunction) => {
     try {
       const users = await prisma.user.findMany({
@@ -101,7 +101,7 @@ router.patch('/me/notification-preferences',
 // GET /users/:id
 router.get('/:id',
   auth,
-  async (req: AuthRequest, res: Response, next: NextFunction) => {
+  withAuth(async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const { id } = req.params
       // Allow self-access or admin
@@ -120,7 +120,7 @@ router.get('/:id',
       if (!user) throw new NotFoundError('User')
       res.json(user)
     } catch (err) { next(err) }
-  },
+  }),
 )
 
 // PATCH /users/:id — update own profile
@@ -134,7 +134,7 @@ const UpdateProfileDto = z.object({
 router.patch('/:id',
   auth,
   validate(UpdateProfileDto),
-  async (req: AuthRequest, res: Response, next: NextFunction) => {
+  withAuth(async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const { id } = req.params
       if (req.user.sub !== id && req.user.role !== 'ADMIN') {
@@ -165,13 +165,13 @@ router.patch('/:id',
       })
       res.json(user)
     } catch (err) { next(err) }
-  },
+  }),
 )
 
 // DELETE /users/:id — admin only (soft deactivate)
 router.delete('/:id',
   auth,
-  authorize('ADMIN') as RequestHandler,
+  authorize('ADMIN'),
   async (req, res: Response, next: NextFunction) => {
     try {
       await prisma.user.update({

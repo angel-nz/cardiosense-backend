@@ -1,6 +1,6 @@
 import { prisma } from '@/config/prisma'
-import { NotFoundError, ForbiddenError } from '@/lib/errors'
-import { callAIPredict } from '@/lib/aiClient'
+import { NotFoundError, ForbiddenError, ModelIneligibleError } from '@/lib/errors'
+import { callAIPredict, getModelCapabilities, isAgeEligible } from '@/lib/aiClient'
 import { PredictionRepository } from './prediction.repository'
 import { HealthRecordRepository } from '@/modules/health-records/record.repository'
 import { AlertService } from '@/modules/alerts/alert.service'
@@ -32,6 +32,21 @@ export class PredictionService {
       record = await recordRepo.findLatestByPatient(dto.patientId)
     }
     if (!record) throw new NotFoundError('Health record — please create one first')
+
+    // U8.6B — model eligibility gate (shared by manual POST /predictions and
+    // the automatic prediction after record creation). Uses the persisted,
+    // backend-derived record.age and the range owned by the model artifact.
+    // Ineligible → no AI call, no Prediction, no Alert, no realtime events.
+    const capabilities = await getModelCapabilities()
+    if (!isAgeEligible(record.age, capabilities)) {
+      const { min, max } = capabilities.eligibleAgeRange
+      throw new ModelIneligibleError(
+        `Prediction unavailable: ${capabilities.modelVersion} does not support age ${record.age} ` +
+        `(observed model age support: ${min}-${max})`,
+        capabilities.modelVersion,
+        capabilities.eligibleAgeRange,
+      )
+    }
 
     // Call AI service
     // U4.2B — patient.sex (already fetched above for ownership, 0=female/

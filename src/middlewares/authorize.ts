@@ -1,9 +1,8 @@
-import type { Response, NextFunction } from 'express'
-import type { AuthRequest } from '@/types'
+import type { Request, Response, NextFunction } from 'express'
 import { ForbiddenError } from '@/lib/errors'
 
 export function authorize(...roles: string[]) {
-  return (req: AuthRequest, _res: Response, next: NextFunction): void => {
+  return (req: Request, _res: Response, next: NextFunction): void => {
     if (!req.user) {
       return next(new ForbiddenError('Not authenticated'))
     }

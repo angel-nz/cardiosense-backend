@@ -1,12 +1,11 @@
 import { Router } from 'express'
-import type { RequestHandler } from 'express'
-import { authenticate } from '@/middlewares/authenticate'
+import { authenticate, withAuth } from '@/middlewares/authenticate'
 import { validate } from '@/middlewares/validate'
 import { TimelineQueryDto } from '@/modules/patients/patient.timeline.dto'
 import * as ctrl from './dashboard.controller'
 
 const router = Router()
-const auth = authenticate as RequestHandler
+const auth = authenticate
 
 router.use(auth)
 
@@ -14,7 +13,7 @@ router.use(auth)
 // predictionsThisWeek, highRiskPatients, riskDistribution) rather than four
 // separate endpoints, per Bloque I's explicit instruction (avoids
 // multiplying requests against the F6-C rate-limit budget).
-router.get('/stats', ctrl.getStats as RequestHandler)
+router.get('/stats', withAuth(ctrl.getStats))
 
 // O2 — GET /api/dashboard/calendar. Reuses P2's TimelineQueryDto verbatim
 // (patient.timeline.dto.ts) — identical from/to semantics (YYYY-MM-DD in

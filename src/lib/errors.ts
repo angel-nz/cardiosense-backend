@@ -40,6 +40,33 @@ export class ValidationError extends AppError {
   }
 }
 
+// U8.6B — prediction outcomes that are NOT technical unavailability.
+// The current model does not support this record's age (observed model age
+// support). Not a statement about the patient, the record, or clinical risk.
+export class ModelIneligibleError extends AppError {
+  constructor(
+    message: string,
+    public readonly modelVersion: string,
+    public readonly eligibleAgeRange: { min: number; max: number },
+  ) {
+    super(message, 422, 'MODEL_INELIGIBLE')
+  }
+}
+
+// The AI service was reachable but rejected the payload as invalid (HTTP 422).
+export class AIInputRejectedError extends AppError {
+  constructor() {
+    super('AI prediction input was rejected by the model service', 422, 'AI_INPUT_REJECTED')
+  }
+}
+
+// The AI service responded with an unexpected failure (not 422/503).
+export class AIServiceError extends AppError {
+  constructor() {
+    super('AI prediction service failed', 502, 'AI_FAILURE')
+  }
+}
+
 export class ServiceUnavailableError extends AppError {
   constructor(service: string) {
     super(`${service} service unavailable`, 503, 'SERVICE_UNAVAILABLE')

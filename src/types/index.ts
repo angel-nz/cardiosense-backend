@@ -1,7 +1,16 @@
 import type { Request } from 'express'
 import type { JwtPayload } from '@/lib/jwt'
 
-// Augment Express Request with authenticated user
+// Any Express request MAY carry an authenticated user (set by `authenticate`).
+declare global {
+  namespace Express {
+    interface Request {
+      user?: JwtPayload
+    }
+  }
+}
+
+// A request for which authentication has already been established.
 export interface AuthRequest extends Request {
   user: JwtPayload
 }

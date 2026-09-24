@@ -1,9 +1,34 @@
 import { z } from 'zod'
+import { toLocalISODate } from '@/lib/timezone'
+
+// U8.6B — patient birthDate DATA-SANITY rule (not model eligibility): a
+// real calendar date that is not after today in the business timezone
+// (America/Mexico_City). Today is allowed. No minimum/maximum age is
+// imposed here — patients of any age remain valid; whether a prediction is
+// possible is decided separately by the model's eligibility contract.
+// Pure and `now`-injectable so it can be verified deterministically.
+export function birthDateIssue(value: string, now: Date = new Date()): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return 'Format: YYYY-MM-DD'
+  const [y, m, d] = value.split('-').map(Number)
+  const probe = new Date(0)
+  probe.setUTCFullYear(y, m - 1, d)
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== m - 1 || probe.getUTCDate() !== d) {
+    return 'Invalid calendar date'
+  }
+  if (value > toLocalISODate(now)) return 'Birth date cannot be in the future'
+  return null
+}
+
+// Shared by create and update — one rule, one place.
+const BirthDateField = z.string().superRefine((value, ctx) => {
+  const issue = birthDateIssue(value)
+  if (issue) ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue })
+})
 
 export const CreatePatientDto = z.object({
   firstName: z.string().min(1).max(100),
   lastName:  z.string().min(1).max(100),
-  birthDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Format: YYYY-MM-DD'),
+  birthDate: BirthDateField,
   sex:       z.number().int().min(0).max(1),
   curp:      z.string().length(18).optional(),
   phone:     z.string().max(20).optional(),
@@ -20,7 +45,7 @@ export const UpdatePatientDto = z.object({
   // DTO doesn't need to special-case it. birthDate/sex keep the exact same
   // validation strictness CreatePatientDto already uses — no new, stricter
   // policy introduced for Update alone.
-  birthDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Format: YYYY-MM-DD').optional(),
+  birthDate: BirthDateField.optional(),
   sex:       z.number().int().min(0).max(1).optional(),
   curp:      z.string().length(18).nullable().optional(),
   phone:     z.string().max(20).nullable().optional(),

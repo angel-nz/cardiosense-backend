@@ -1,5 +1,5 @@
 import { prisma } from '@/config/prisma'
-import { NotFoundError, ForbiddenError } from '@/lib/errors'
+import { NotFoundError, ForbiddenError, ModelIneligibleError } from '@/lib/errors'
 import { logger } from '@/lib/logger'
 import { calculateAge } from '@/lib/age'
 import { HealthRecordRepository } from './record.repository'
@@ -60,6 +60,39 @@ export class HealthRecordService {
     new PredictionService(this.io)
       .predict(userId, { patientId: record.patientId, healthRecordId: record.id })
       .catch(err => {
+        // U8.6C — MODEL_INELIGIBLE is an expected domain outcome (the
+        // current model does not support this record's age), never a
+        // technical failure. No Prediction/Alert/prediction_completed is
+        // produced for it (by design, inside predict() itself — nothing
+        // changes here about that). Logged at `info`, not `error` — this
+        // is not something operationally wrong. The dedicated
+        // `prediction_unavailable` event lets a doctor currently viewing
+        // this patient learn the outcome without polling; `userId` here is
+        // the SAME authenticated doctor already used for
+        // `dashboard_activity_changed` above — never derived from anything
+        // client-supplied at this point, so this can only ever reach the
+        // room of the doctor who created this exact record.
+        if (err instanceof ModelIneligibleError) {
+          logger.info('Automatic prediction skipped: model ineligible', {
+            recordId: record.id,
+            patientId: record.patientId,
+            age: record.age,
+            modelVersion: err.modelVersion,
+          })
+          this.io?.to(`user:${userId}`).emit('prediction_unavailable', {
+            patientId: record.patientId,
+            healthRecordId: record.id,
+            reason: 'MODEL_INELIGIBLE',
+            modelVersion: err.modelVersion,
+            eligibleAgeRange: err.eligibleAgeRange,
+          })
+          return
+        }
+        // Technical/unexpected failures (AI unreachable, AI 500/502, etc.)
+        // keep the original error-level log — nothing here changes for
+        // that case, and no prediction_unavailable is emitted for it
+        // (that event means "the record is fine, the model just doesn't
+        // support it" — never "something went wrong").
         logger.error('Automatic prediction failed for new health record', {
           recordId: record.id,
           patientId: record.patientId,

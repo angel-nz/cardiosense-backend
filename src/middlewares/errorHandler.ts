@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express'
-import { AppError } from '@/lib/errors'
+import { AppError, ModelIneligibleError } from '@/lib/errors'
 import { logger } from '@/lib/logger'
 import { Prisma } from '@prisma/client'
 
@@ -9,6 +9,22 @@ export function errorHandler(
   res: Response,
   _next: NextFunction,
 ): void {
+  // U8.6C — checked BEFORE the generic AppError branch (ModelIneligibleError
+  // extends AppError, so it would otherwise match that branch first and
+  // lose its extra fields). The frontend needs modelVersion/eligibleAgeRange
+  // to build its message dynamically — the range must never be hardcoded
+  // client-side. These are the only two fields added; no other AppError
+  // subtype exposes extra data through this handler.
+  if (err instanceof ModelIneligibleError) {
+    res.status(err.statusCode).json({
+      error: err.message,
+      code: err.code,
+      modelVersion: err.modelVersion,
+      eligibleAgeRange: err.eligibleAgeRange,
+    })
+    return
+  }
+
   // Known application errors
   if (err instanceof AppError) {
     res.status(err.statusCode).json({

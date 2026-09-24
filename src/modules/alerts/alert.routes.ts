@@ -1,14 +1,13 @@
 import { Router } from 'express'
-import type { RequestHandler } from 'express'
 import type { Server as IOServer } from 'socket.io'
-import { authenticate } from '@/middlewares/authenticate'
+import { authenticate, withAuth } from '@/middlewares/authenticate'
 import { validate } from '@/middlewares/validate'
 import { AlertQueryDto, AlertParamDto } from './alert.dto'
 import { createAlertController } from './alert.controller'
 
 export function createAlertRouter(io?: IOServer) {
   const router = Router()
-  const auth   = authenticate as RequestHandler
+  const auth   = authenticate
   const ctrl   = createAlertController(io)
 
   router.use(auth)
@@ -16,16 +15,16 @@ export function createAlertRouter(io?: IOServer) {
   // GET  /alerts
   router.get('/',
     validate(AlertQueryDto, 'query'),
-    ctrl.list as RequestHandler,
+    withAuth(ctrl.list),
   )
 
   // PATCH /alerts/read-all
-  router.patch('/read-all', ctrl.markAllRead as RequestHandler)
+  router.patch('/read-all', withAuth(ctrl.markAllRead))
 
   // PATCH /alerts/:id/read
   router.patch('/:id/read',
     validate(AlertParamDto, 'params'),
-    ctrl.markRead as RequestHandler,
+    withAuth(ctrl.markRead),
   )
 
   return router
