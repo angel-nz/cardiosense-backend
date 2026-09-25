@@ -25,9 +25,35 @@ export class PredictionRepository {
   // that doesn't exist or belongs to another patient is reported through
   // the single `targetResolved: false` outcome, never fabricated into
   // results. Normal callers omitting `targetId` are entirely unaffected.
-  async findByPatient(patientId: string, opts: { page: number; limit: number; targetId?: string }) {
-    const { page, limit, targetId } = opts
-    const where = { patientId }
+  //
+  // W5.2 — from/to/riskLevel added (additive). `where` is built ONCE below
+  // and reused, by the same object reference, by every query in this
+  // method — the targetId lookup, the precedingCount, the total count, and
+  // the findMany — exactly mirroring listAll's existing filter-composition
+  // pattern (same gte/lt half-open convention, same `riskLevel` direct
+  // equality, no score-threshold reinterpretation). This is what
+  // guarantees filters apply BEFORE pagination AND before target-page
+  // resolution with no special-casing: a targetId that exists for this
+  // patient but falls outside the active from/to/riskLevel filters simply
+  // fails the SAME `where`-scoped lookup as a nonexistent/foreign one —
+  // targetResolved=false, resolvedPage silently stays the originally
+  // requested page (never mutated in that branch), filters are never
+  // touched.
+  async findByPatient(patientId: string, opts: {
+    page: number; limit: number; targetId?: string
+    from?: Date; to?: Date; riskLevel?: RiskLevel
+  }) {
+    const { page, limit, targetId, from, to, riskLevel } = opts
+    const where = {
+      patientId,
+      ...(riskLevel ? { riskLevel } : {}),
+      ...(from || to ? {
+        predictedAt: {
+          ...(from ? { gte: from } : {}),
+          ...(to   ? { lt: to }    : {}),
+        },
+      } : {}),
+    }
 
     let resolvedPage = page
     let targetResolved: boolean | undefined

@@ -15,11 +15,26 @@ export const PredictionQueryDto = z.object({
 // (manual `Number(req.query.page) || 1` parsing, same pattern U6.1 found
 // and fixed for the global endpoint) — formalized here as part of adding
 // `targetId` deep-link resolution (see prediction.repository.ts).
+//
+// W5.2 — from/to/riskLevel added (additive; page/limit/targetId unchanged).
+// riskLevel validation mirrors GlobalPredictionQueryDto's own
+// `z.enum(['LOW','MODERATE','HIGH']).optional()` verbatim — one canonical
+// enum validation, not a second definition. from/to reuse the same
+// boundaryField('from'|'to') helper (lib/timezone.ts) already used by
+// GlobalPredictionQueryDto/TimelineQueryDto — same half-open [from, to)
+// instant semantics, no new date-parsing logic. The from<=to refine below
+// is the identical guard already used on both of those DTOs.
 export const PatientPredictionQueryDto = z.object({
-  page:     z.coerce.number().int().min(1).default(1),
-  limit:    z.coerce.number().int().min(1).max(100).default(20),
-  targetId: z.string().uuid('Invalid target id').optional(),
-})
+  page:      z.coerce.number().int().min(1).default(1),
+  limit:     z.coerce.number().int().min(1).max(100).default(20),
+  targetId:  z.string().uuid('Invalid target id').optional(),
+  riskLevel: z.enum(['LOW', 'MODERATE', 'HIGH']).optional(),
+  from:      boundaryField('from'),
+  to:        boundaryField('to'),
+}).refine(
+  data => !data.from || !data.to || data.from <= data.to,
+  { message: '"from" must not be after "to"', path: ['from'] },
+)
 
 // U6.2 — GET /api/predictions global history. `search` normalization
 // (trim/whitespace-collapse/tokenization) happens in the repository, where

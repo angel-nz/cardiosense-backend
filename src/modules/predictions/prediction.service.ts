@@ -105,9 +105,21 @@ export class PredictionService {
     }
 
     // Emit Socket.IO event to patient room
+    // W4.2 — healthRecordId added (additive; predictionId/patientId/
+    // riskScore/riskLevel/isAnomaly unchanged). `record` above is always a
+    // concrete, already-resolved HealthRecord by this point (resolved at
+    // lines 28-34 — either the caller's explicit dto.healthRecordId or the
+    // patient's latest record; a NotFoundError is thrown earlier if neither
+    // exists), so record.id is always a real, non-null id here — matching
+    // exactly how the existing prediction_unavailable event already types
+    // its own healthRecordId as a required (non-nullable) string despite
+    // the same underlying nullable Prisma column. Reached by BOTH the
+    // automatic (record-creation-triggered) and manual (POST /predictions)
+    // callers of predict() — both now carry this field identically.
     this.io?.to(`patient:${dto.patientId}`).emit('prediction_completed', {
       predictionId: prediction.id,
       patientId:    dto.patientId,
+      healthRecordId: record.id,
       riskScore:    aiResult.risk_score,
       riskLevel:    aiResult.risk_level,
       isAnomaly:    aiResult.is_anomaly,

@@ -1,5 +1,8 @@
 import { prisma } from '@/config/prisma'
-import { NotFoundError, ForbiddenError, ModelIneligibleError } from '@/lib/errors'
+import {
+  NotFoundError, ForbiddenError, ModelIneligibleError,
+  ServiceUnavailableError, AIInputRejectedError, AIServiceError,
+} from '@/lib/errors'
 import { logger } from '@/lib/logger'
 import { calculateAge } from '@/lib/age'
 import { HealthRecordRepository } from './record.repository'
@@ -106,6 +109,45 @@ export class HealthRecordService {
           patientId: record.patientId,
           err: err instanceof Error ? err.message : err,
         })
+
+        // W4.2 — prediction_failed. Additive, technical-failure-only signal
+        // so the asynchronous automatic (record-creation-triggered) path is
+        // not silent to the frontend beyond this log line. Scoped
+        // EXCLUSIVELY to this automatic catch — never emitted from
+        // PredictionService.predict() itself, and never reached by the
+        // manual POST /predictions path (that endpoint already surfaces
+        // any of these same error classes synchronously as an HTTP error
+        // response to the caller that made the request; emitting a
+        // redundant socket event for that call would double-report the
+        // same failure). MODEL_INELIGIBLE is deliberately excluded from
+        // this enum — it is handled above as prediction_unavailable, a
+        // distinct domain outcome, not a technical failure. Mapping is
+        // exhaustive over every error class mapAIError() (aiClient.ts) and
+        // getModelCapabilities() can actually throw:
+        //   ServiceUnavailableError -> AI_UNAVAILABLE (AI unreachable, or
+        //     AI's own 503 "model not loaded")
+        //   AIInputRejectedError    -> AI_INPUT_REJECTED (AI's own 422)
+        //   AIServiceError          -> AI_FAILURE (any other AI failure)
+        // Any OTHER error reaching this catch (e.g. a NotFoundError/
+        // ForbiddenError from predict()'s own patient/health-record
+        // resolution — not expected in practice, since this call always
+        // reuses the same userId/record this method itself just verified)
+        // is intentionally left unmapped: it would not be semantically
+        // correct to tell the doctor "AI_FAILURE" for a failure that has
+        // nothing to do with the AI service. It remains covered by the
+        // logger.error call above only, same as before this change.
+        let reason: 'AI_UNAVAILABLE' | 'AI_INPUT_REJECTED' | 'AI_FAILURE' | null = null
+        if (err instanceof ServiceUnavailableError) reason = 'AI_UNAVAILABLE'
+        else if (err instanceof AIInputRejectedError) reason = 'AI_INPUT_REJECTED'
+        else if (err instanceof AIServiceError) reason = 'AI_FAILURE'
+
+        if (reason) {
+          this.io?.to(`user:${userId}`).emit('prediction_failed', {
+            patientId: record.patientId,
+            healthRecordId: record.id,
+            reason,
+          })
+        }
       })
 
     return record
