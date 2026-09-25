@@ -111,6 +111,11 @@ export class DashboardRepository {
   }
 
   // O2.10 — ALERT source.
+  //
+  // W2.2 — same `include` added here as alert.repository.ts::findInRangeForPatient
+  // (single JOIN inside this one findMany call, no N+1), so
+  // dashboard.calendar.ts's reuse of toAlertEvent() can derive the same
+  // deterministic groupId for the Dashboard's multi-patient view.
   async findAlertsInRange(medicoId: string, from?: Date, to?: Date): Promise<Array<{
     id: string
     patientId: string
@@ -119,6 +124,7 @@ export class DashboardRepository {
     severity: string
     message: string
     isRead: boolean
+    prediction: { healthRecordId: string | null } | null
   }>> {
     return prisma.alert.findMany({
       where: {
@@ -131,6 +137,9 @@ export class DashboardRepository {
         } : {}),
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: {
+        prediction: { select: { healthRecordId: true } },
+      },
     })
   }
 

@@ -96,6 +96,15 @@ export class AlertRepository {
   // of the patient is already verified by the caller before this runs,
   // same pattern as HealthRecordRepository/PredictionRepository above),
   // same [from, to) filter and asc+id ordering.
+  //
+  // W2.2 — `include: { prediction: { select: { healthRecordId: true } } }`
+  // added so patient.timeline.ts's toAlertEvent() can derive a deterministic
+  // groupId (Alert → its Prediction → that Prediction's HealthRecord)
+  // without a second query. This is a single JOIN inside the SAME
+  // `findMany` call, not a per-alert lookup — still exactly one Prisma
+  // query regardless of result size (no N+1). Only `healthRecordId` is
+  // selected off the related Prediction — nothing else about it is loaded
+  // or exposed.
   async findInRangeForPatient(patientId: string, from?: Date, to?: Date) {
     return prisma.alert.findMany({
       where: {
@@ -108,6 +117,9 @@ export class AlertRepository {
         } : {}),
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: {
+        prediction: { select: { healthRecordId: true } },
+      },
     })
   }
 }
