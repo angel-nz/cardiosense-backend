@@ -51,12 +51,19 @@ export class PredictionRepository {
     }
     const skip = (resolvedPage - 1) * limit
 
+    // V7 — includes the linked HealthRecord (Prediction.healthRecordId is
+    // nullable, so this can be `null` for legacy/unlinked Predictions —
+    // never substituted with the patient's latest record or any other
+    // record). A single `include` inside the SAME findMany query — Prisma
+    // resolves this as one JOIN, not a query per row, so pagination stays
+    // exactly as before and no N+1 is introduced.
     const [data, total] = await prisma.$transaction([
       prisma.prediction.findMany({
         where,
         orderBy: [{ predictedAt: 'desc' }, { id: 'desc' }],
         skip,
         take:    limit,
+        include: { healthRecord: true },
       }),
       prisma.prediction.count({ where }),
     ])
@@ -120,6 +127,9 @@ export class PredictionRepository {
       } : {}),
     }
 
+    // V7 — same include-based relation load as findByPatient above, added
+    // alongside the existing `patient` include in this SAME findMany call
+    // (still one query, one JOIN) — no additional round trip.
     const [data, total] = await prisma.$transaction([
       prisma.prediction.findMany({
         where,
@@ -127,7 +137,8 @@ export class PredictionRepository {
         skip,
         take: limit,
         include: {
-          patient: { select: { firstName: true, lastName: true, curp: true } },
+          patient:      { select: { firstName: true, lastName: true, curp: true } },
+          healthRecord: true,
         },
       }),
       prisma.prediction.count({ where }),

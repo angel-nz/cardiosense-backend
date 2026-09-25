@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { toLocalISODate } from '@/lib/timezone'
+import { isCanonicalPhone } from '@/lib/phone'
 
 // U8.6B — patient birthDate DATA-SANITY rule (not model eligibility): a
 // real calendar date that is not after today in the business timezone
@@ -25,13 +26,27 @@ const BirthDateField = z.string().superRefine((value, ctx) => {
   if (issue) ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue })
 })
 
+// V6.2 §1/§5/§9 — canonical phone contract. Used ONLY on Create, where
+// there is no pre-existing Patient row to compare against, so full
+// canonical-equality enforcement at the DTO layer is safe and correct: any
+// submitted phone must already be `parsePhoneNumberFromString(value)
+// .format('E.164') === value` (see lib/phone.ts::isCanonicalPhone) —
+// display-formatted ("+52 33 1234 5678"), malformed, impossible, or
+// arbitrary-text values are all rejected here, before the service layer.
+export const PHONE_MESSAGE = 'Phone must be a valid canonical international number (E.164 format, e.g. +523312345678), with no spaces or punctuation'
+const CanonicalPhoneField = z.string().max(20).superRefine((value, ctx) => {
+  if (!isCanonicalPhone(value)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: PHONE_MESSAGE })
+  }
+})
+
 export const CreatePatientDto = z.object({
   firstName: z.string().min(1).max(100),
   lastName:  z.string().min(1).max(100),
   birthDate: BirthDateField,
   sex:       z.number().int().min(0).max(1),
   curp:      z.string().length(18).optional(),
-  phone:     z.string().max(20).optional(),
+  phone:     CanonicalPhoneField.optional(),
 })
 
 export const UpdatePatientDto = z.object({
@@ -48,6 +63,17 @@ export const UpdatePatientDto = z.object({
   birthDate: BirthDateField.optional(),
   sex:       z.number().int().min(0).max(1).optional(),
   curp:      z.string().length(18).nullable().optional(),
+  // V6.2 §3/§10 — deliberately NOT `CanonicalPhoneField` here. The
+  // `validate()` middleware runs before the controller/service ever see
+  // req.body, so a DTO-level refinement has no access to the currently
+  // persisted Patient — it cannot distinguish "doctor resent the existing
+  // legacy phone unchanged" (must be accepted — V6.2 §4) from "doctor
+  // typed a genuinely new invalid phone" (must be rejected — V6.2 §5).
+  // Only a syntactic sanity bound (string, ≤20 chars, matching the
+  // pre-existing DTO shape) is enforced here; canonical-format validation
+  // for an ACTUALLY CHANGED value is enforced in PatientService.update()
+  // (patient.service.ts), which has the current row to compare against.
+  // See V6.2 report §1/§2/§10 for the full audit and rationale.
   phone:     z.string().max(20).nullable().optional(),
   isActive:  z.boolean().optional(),
 })

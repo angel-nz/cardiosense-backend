@@ -23,13 +23,21 @@ export class HealthRecordService {
     // Verify patient belongs to this doctor — now returns the owned Patient
     // (U3.2) so age derivation below reuses it instead of a second query.
     const patient = await this.assertPatientOwnership(userId, dto.patientId)
-    // U3.2 — age is backend-authoritative, derived from Paciente.birthDate
-    // at persistence time (this record's own observation moment — recordedAt
-    // is still server-generated `now()`, unchanged). Any `dto.age` the
-    // client might still send (now optional, kept only for legacy callers —
-    // see record.dto.ts) is always overwritten here, never trusted.
-    const age = calculateAge(patient.birthDate, new Date())
-    const record = await repo.create(userId, { ...dto, age })
+    // U3.2 / V-AGE-FIX-2 §3 — age is backend-authoritative, derived from
+    // Paciente.birthDate at persistence time (this record's own observation
+    // moment). `recordedAt` was previously left to Prisma's `@default(now())`
+    // at INSERT time, a SEPARATE `now()` evaluation from the one used here
+    // for `age` — two independent instants that could (in principle, right
+    // around a UTC calendar-day boundary) disagree on what "today" is,
+    // letting age and recordedAt describe two different observation dates
+    // for the same record. `recordedAt` is now derived from this SAME `now`
+    // instance and passed through explicitly, so age and recordedAt always
+    // describe one canonical instant. Any `dto.age` the client might still
+    // send (now optional, kept only for legacy callers — see record.dto.ts)
+    // is always overwritten here, never trusted.
+    const now = new Date()
+    const age = calculateAge(patient.birthDate, now)
+    const record = await repo.create(userId, { ...dto, age, recordedAt: now })
     this.io?.to(`patient:${record.patientId}`).emit('health_record_created', {
       recordId:   record.id,
       patientId:  record.patientId,

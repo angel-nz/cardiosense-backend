@@ -1,7 +1,9 @@
 import { prisma } from '@/config/prisma'
-import { NotFoundError, ForbiddenError } from '@/lib/errors'
+import { NotFoundError, ForbiddenError, ValidationError } from '@/lib/errors'
+import { isCanonicalPhone } from '@/lib/phone'
 import { PatientRepository } from './patient.repository'
 import { paginate } from '@/types'
+import { PHONE_MESSAGE } from './patient.dto'
 import type { CreatePatientDtoType, UpdatePatientDtoType, PatientQueryDtoType, HistoryQueryDtoType } from './patient.dto'
 import type { Server as IOServer } from 'socket.io'
 import { HealthRecordRepository } from '@/modules/health-records/record.repository'
@@ -59,8 +61,42 @@ export class PatientService {
   // to room `patient:{patientId}` — same room as subscribe_patient/
   // unsubscribe_patient (INT-16/17) and prediction_completed (INT-19).
   // Never touches `user:{userId}` (that room is exclusively for new_alert).
+  // V6.2 §3/§4/§5/§6/§10 — phone legacy-compatibility boundary.
+  //
+  // Audit (V6.2 §3): EditPatientModal always resends `phone` in full on
+  // every submit (`form.phone.trim() || null`), never omitting it just
+  // because it wasn't the field the doctor actually changed — confirmed by
+  // direct read of EditPatientModal.tsx's `submit()`. So UpdatePatientDto
+  // cannot enforce canonical format for every non-null `phone` string: a
+  // patient with a pre-V6 legacy value (e.g. "+52 33 1234 5678", with
+  // spaces) would then fail EVERY future edit, even one that only changes
+  // firstName — exactly what V6.2 §4 forbids.
+  //
+  // Resolution: `UpdatePatientDto` (patient.dto.ts) now only enforces
+  // syntactic sanity (string, ≤20 chars) on `phone`, not canonical format.
+  // Here — where the CURRENTLY PERSISTED Patient is available — a
+  // non-null, non-undefined `dto.phone` is classified as:
+  //   - IDENTICAL to the stored value → an unchanged resend of a
+  //     (possibly legacy) phone → allowed through untouched, never
+  //     re-validated, never auto-normalized;
+  //   - DIFFERENT from the stored value → a genuine new/changed phone →
+  //     must satisfy the canonical E.164 contract (isCanonicalPhone),
+  //     rejected with the same PHONE_MESSAGE Create uses otherwise.
+  // `dto.phone === undefined` (field omitted) and `dto.phone === null`
+  // (explicit clear) are both left entirely alone — neither is a "change
+  // to validate" in the canonical-format sense, matching V6.2 §5's ACCEPT
+  // list exactly. This is the narrowest correct validation placement: Zod
+  // stays declarative for every other field, and only phone's one
+  // legacy-compatibility exception needs the current row.
   async update(userId: string, patientId: string, dto: UpdatePatientDtoType) {
-    await this.getOne(userId, patientId)
+    const current = await this.getOne(userId, patientId)
+
+    if (typeof dto.phone === 'string' && dto.phone !== current.phone) {
+      if (!isCanonicalPhone(dto.phone)) {
+        throw new ValidationError(PHONE_MESSAGE)
+      }
+    }
+
     const patient = await repo.update(patientId, dto)
     this.emitPatientUpdated(patient)
     return patient
