@@ -1,14 +1,32 @@
 import { prisma } from '@/config/prisma'
 import type { CreatePatientDtoType, UpdatePatientDtoType } from './patient.dto'
+import type { RiskLevel, Prisma } from '@prisma/client'
 
 export class PatientRepository {
+  // X2 — `risk` filters the dataset BEFORE pagination, matching the EXACT
+  // "current risk" semantics already established and validated by
+  // dashboard.repository.ts::findPatientsWithLatestRisk / dashboard.service.ts's
+  // summarizeRisk: the patient's single MOST RECENT Prediction (predictedAt
+  // desc, take:1) has riskLevel === risk — deliberately NOT
+  // `predictions: { some: { riskLevel } }`, which would mean "ever had this
+  // riskLevel" (wrong — a patient whose latest Prediction is LOW but had an
+  // old HIGH one must be excluded). Prisma has no native "filter by latest
+  // related row" predicate, so the smallest correct strategy (no raw SQL,
+  // no schema change, no approximation) is: resolve the candidate patient
+  // ids whose latest Prediction matches in one prefilter query — reusing
+  // the exact same medicoId+search scoping (`baseWhere`) so search and risk
+  // compose correctly together — then apply that id set to the real
+  // paginated/counted query below, so `total`/`totalPages` describe the
+  // risk-filtered dataset itself, not an unfiltered page re-sliced
+  // afterward. An empty `matchedIds` correctly yields zero rows/total via
+  // `id: { in: [] }`, never a fabricated/approximated result.
   async findAll(medicoId: string, opts: {
-    page: number; limit: number; search?: string
+    page: number; limit: number; search?: string; risk?: RiskLevel
   }) {
-    const { page, limit, search } = opts
+    const { page, limit, search, risk } = opts
     const skip = (page - 1) * limit
 
-    const where = {
+    const baseWhere: Prisma.PacienteWhereInput = {
       medicoId,
       ...(search && {
         OR: [
@@ -17,6 +35,25 @@ export class PatientRepository {
           { curp:      { contains: search, mode: 'insensitive' as const } },
         ],
       }),
+    }
+
+    let where: Prisma.PacienteWhereInput = baseWhere
+    if (risk) {
+      const candidates = await prisma.paciente.findMany({
+        where: baseWhere,
+        select: {
+          id: true,
+          predictions: {
+            orderBy: { predictedAt: 'desc' },
+            take: 1,
+            select: { riskLevel: true },
+          },
+        },
+      })
+      const matchedIds = candidates
+        .filter(p => p.predictions[0]?.riskLevel === risk)
+        .map(p => p.id)
+      where = { ...baseWhere, id: { in: matchedIds } }
     }
 
     const [data, total] = await prisma.$transaction([

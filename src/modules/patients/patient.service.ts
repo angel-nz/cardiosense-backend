@@ -25,10 +25,16 @@ export class PatientService {
 
   async list(userId: string, query: PatientQueryDtoType) {
     const medico = await this.getMedicoOrThrow(userId)
+    // X2 — `risk` (already validated/coerced to canonical uppercase by
+    // PatientQueryDto) is now genuinely forwarded to the repository, which
+    // filters dataset-wide, before pagination, on each patient's latest
+    // Prediction — see patient.repository.ts. Previously accepted by
+    // validation but silently dropped here.
     const { data, total } = await repo.findAll(medico.id, {
       page:   query.page,
       limit:  query.limit,
       search: query.search,
+      risk:   query.risk,
     })
     return paginate(data, total, query.page, query.limit)
   }
