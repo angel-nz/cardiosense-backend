@@ -1,5 +1,5 @@
 import { prisma } from '@/config/prisma'
-import { NotFoundError, ForbiddenError, ModelIneligibleError } from '@/lib/errors'
+import { NotFoundError, ForbiddenError, ModelIneligibleError, PatientInactiveError } from '@/lib/errors'
 import { callAIPredict, getModelCapabilities, isAgeEligible } from '@/lib/aiClient'
 import { PredictionRepository } from './prediction.repository'
 import { HealthRecordRepository } from '@/modules/health-records/record.repository'
@@ -18,11 +18,24 @@ export class PredictionService {
   async predict(userId: string, dto: CreatePredictionDtoType) {
     const medico = await this.getMedicoOrThrow(userId)
 
-    // Verify patient ownership
+    // Verify patient ownership. Z8 §26/§29 — isHidden=true is excluded here
+    // so a hidden patient behaves exactly like a nonexistent one (no
+    // "exists but hidden" leak) for BOTH the manual POST /predictions path
+    // and the automatic (HealthRecordService-triggered) path, since both
+    // reach this same method.
     const patient = await prisma.paciente.findFirst({
-      where: { id: dto.patientId, medicoId: medico.id },
+      where: { id: dto.patientId, medicoId: medico.id, isHidden: false },
     })
     if (!patient) throw new NotFoundError('Patient')
+
+    // Z8 §29 — required order: resolve patient -> ownership -> hidden? ->
+    // active? -> resolve latest record/features -> callAIPredict. A
+    // resolved-but-INACTIVE patient (isActive=false, isHidden=false —
+    // otherwise the lookup above would already have thrown NotFoundError)
+    // may not receive a new prediction. Thrown BEFORE record resolution and
+    // well before the callAIPredict call below — critical invariant: no AI
+    // request is ever made for an inactive or hidden patient.
+    if (!patient.isActive) throw new PatientInactiveError()
 
     // Get the health record to use
     let record
@@ -74,7 +87,13 @@ export class PredictionService {
       modelVersion:  aiResult.model_version,
     })
 
-    // Create alert when high risk or anomaly
+    // Create alert when high risk or anomaly. Y4 — branching, severity and
+    // message text are UNCHANGED from before Y4 (verified against source
+    // before editing, per Y4 §4); the only addition is `realtimeCategory`,
+    // an explicit label attached to each existing branch so the realtime
+    // delivery layer knows the actual clinical cause without inferring it
+    // from severity (HIGH's CRITICAL is unambiguous, but WARNING is shared
+    // by both the anomaly branch and the MODERATE branch below — Y4 §3/§31).
     const alertSvc = new AlertService(this.io)
     if (riskLevel === 'HIGH' || aiResult.is_anomaly) {
       const severity = riskLevel === 'HIGH' ? 'CRITICAL' : 'WARNING'
@@ -82,6 +101,10 @@ export class PredictionService {
       const message = riskLevel === 'HIGH'
         ? `Riesgo cardiovascular alto detectado (${scorePercent}%). Requiere atención inmediata.`
         : `Anomalía detectada en indicadores de salud (score: ${aiResult.anomaly_score.toFixed(4)}).`
+      // HIGH takes precedence over an incidental anomaly flag here — this
+      // mirrors the existing severity ternary immediately above exactly
+      // (CRITICAL only for HIGH), it does not add a new condition.
+      const realtimeCategory = riskLevel === 'HIGH' ? 'HIGH_RISK' : 'ANOMALY'
 
       await alertSvc.create({
         patientId:    dto.patientId,
@@ -91,6 +114,7 @@ export class PredictionService {
         medicoUserId: userId,
         patientName:  `${patient.firstName} ${patient.lastName}`,
         riskScore:    aiResult.risk_score,
+        realtimeCategory,
       })
     } else if (riskLevel === 'MODERATE') {
       await alertSvc.create({
@@ -101,6 +125,7 @@ export class PredictionService {
         medicoUserId: userId,
         patientName:  `${patient.firstName} ${patient.lastName}`,
         riskScore:    aiResult.risk_score,
+        realtimeCategory: 'MODERATE_RISK',
       })
     }
 
@@ -143,8 +168,11 @@ export class PredictionService {
 
   async listByPatient(userId: string, patientId: string, opts: PatientPredictionQueryDtoType) {
     const medico = await this.getMedicoOrThrow(userId)
+    // Z8 §26/§33 — read-only path: isHidden=true excluded (same as predict()
+    // above), but NO isActive check — an INACTIVE_VISIBLE patient's existing
+    // prediction history must remain fully browsable.
     const patient = await prisma.paciente.findFirst({
-      where: { id: patientId, medicoId: medico.id },
+      where: { id: patientId, medicoId: medico.id, isHidden: false },
     })
     if (!patient) throw new NotFoundError('Patient')
 

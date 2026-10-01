@@ -4,10 +4,14 @@ import { Prisma } from '@prisma/client'
 export class DashboardRepository {
   // I1 — count only; scoping (patient.medicoId) applied inside Prisma, not
   // in application code.
+  // Z8 §31 — isHidden=false added: a hidden patient must not contribute to
+  // any normal operational Dashboard metric. No current metric is defined
+  // as "ACTIVE patients only" (confirmed by audit of dashboard.service.ts
+  // before this change), so no additional isActive predicate is added here.
   async countPredictionsInRange(medicoId: string, start: Date, end: Date): Promise<number> {
     return prisma.prediction.count({
       where: {
-        patient: { medicoId },
+        patient: { medicoId, isHidden: false },
         predictedAt: { gte: start, lt: end },
       },
     })
@@ -15,10 +19,11 @@ export class DashboardRepository {
 
   // I3 — only the timestamp is selected; bucketing by local day happens in
   // the service, over a dataset already bounded to one médico's one week.
+  // Z8 §31 — isHidden=false added, same exclusion as above.
   async findPredictedAtInRange(medicoId: string, start: Date, end: Date): Promise<Array<{ predictedAt: Date }>> {
     return prisma.prediction.findMany({
       where: {
-        patient: { medicoId },
+        patient: { medicoId, isHidden: false },
         predictedAt: { gte: start, lt: end },
       },
       select: { predictedAt: true },
@@ -31,9 +36,11 @@ export class DashboardRepository {
   // used and validated by patient.repository.ts (Bloque B), reimplemented
   // here independently rather than imported, per the Bloque I instruction
   // to keep Dashboard's queries self-contained and auditable on their own.
+  // Z8 §31 — isHidden=false added: hidden patients must not contribute to
+  // the risk-distribution widget.
   async findPatientsWithLatestRisk(medicoId: string): Promise<Array<{ predictions: Array<{ riskLevel: string }> }>> {
     return prisma.paciente.findMany({
-      where: { medicoId },
+      where: { medicoId, isHidden: false },
       select: {
         predictions: {
           orderBy: { predictedAt: 'desc' },
@@ -52,9 +59,12 @@ export class DashboardRepository {
 
   // O2.7 — patient identity for `patientName` decoration. One query for
   // ALL of the médico's patients, never one findUnique per event.
+  // Z8 §31/§32 — isHidden=false added: a hidden patient's identity must
+  // never decorate a calendar event (no clickable event leading to an
+  // inaccessible hidden patient).
   async findPatientIdentities(medicoId: string): Promise<Array<{ id: string; firstName: string; lastName: string }>> {
     return prisma.paciente.findMany({
-      where: { medicoId },
+      where: { medicoId, isHidden: false },
       select: { id: true, firstName: true, lastName: true },
     })
   }
@@ -71,7 +81,9 @@ export class DashboardRepository {
   }>> {
     return prisma.healthRecord.findMany({
       where: {
-        patient: { medicoId },
+        // Z8 §31/§32 — isHidden=false added: no CLINICAL_RECORD calendar
+        // event for a hidden patient.
+        patient: { medicoId, isHidden: false },
         ...(from || to ? {
           recordedAt: {
             ...(from ? { gte: from } : {}),
@@ -98,7 +110,10 @@ export class DashboardRepository {
   }>> {
     return prisma.prediction.findMany({
       where: {
-        patient: { medicoId },
+        // Z8 §31/§32 — isHidden=false added: no PREDICTION calendar event
+        // (and, downstream, no RISK_CHANGE derivation) for a hidden
+        // patient.
+        patient: { medicoId, isHidden: false },
         ...(from || to ? {
           predictedAt: {
             ...(from ? { gte: from } : {}),
@@ -110,38 +125,10 @@ export class DashboardRepository {
     })
   }
 
-  // O2.10 — ALERT source.
-  //
-  // W2.2 — same `include` added here as alert.repository.ts::findInRangeForPatient
-  // (single JOIN inside this one findMany call, no N+1), so
-  // dashboard.calendar.ts's reuse of toAlertEvent() can derive the same
-  // deterministic groupId for the Dashboard's multi-patient view.
-  async findAlertsInRange(medicoId: string, from?: Date, to?: Date): Promise<Array<{
-    id: string
-    patientId: string
-    predictionId: string | null
-    createdAt: Date
-    severity: string
-    message: string
-    isRead: boolean
-    prediction: { healthRecordId: string | null } | null
-  }>> {
-    return prisma.alert.findMany({
-      where: {
-        patient: { medicoId },
-        ...(from || to ? {
-          createdAt: {
-            ...(from ? { gte: from } : {}),
-            ...(to ? { lt: to } : {}),
-          },
-        } : {}),
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      include: {
-        prediction: { select: { healthRecordId: true } },
-      },
-    })
-  }
+  // Z2 — O2.10's ALERT source (findAlertsInRange) was removed: it was used
+  // exclusively by getCalendar() for the now-deleted Alert-model calendar
+  // events, and by no other feature (confirmed by repo-wide search before
+  // removal).
 
   // O2.11 — predecessor query. Real column/table names confirmed from
   // schema.prisma: table `predictions` (patient_id, predicted_at,
@@ -167,6 +154,9 @@ export class DashboardRepository {
   // Tie-break: predicted_at DESC, id DESC — deterministic choice for this
   // new query (P2's own single-patient findPredecessor has no id tie-break;
   // not reopened here, just not propagated into this new one).
+  // Z8 §31/§32 — the JOIN condition also requires pa.is_hidden = false, so a
+  // hidden patient's predecessor Prediction can never feed a RISK_CHANGE
+  // calendar event derivation, consistent with every other query above.
   // O2-FIX — patient_id is TEXT in this schema (confirmed directly from
   // migration.sql: `"patient_id" TEXT NOT NULL` — no native Postgres `uuid`
   // column anywhere in this project), so no ::uuid cast is actually needed
@@ -190,7 +180,7 @@ export class DashboardRepository {
         p.predicted_at AS "predictedAt",
         p.risk_level AS "riskLevel"
       FROM predictions p
-      JOIN pacientes pa ON pa.id = p.patient_id AND pa.medico_id = ${medicoId}
+      JOIN pacientes pa ON pa.id = p.patient_id AND pa.medico_id = ${medicoId} AND pa.is_hidden = false
       WHERE p.patient_id IN (${Prisma.join(patientIds)})
         AND p.predicted_at < ${before}
       ORDER BY p.patient_id, p.predicted_at DESC, p.id DESC

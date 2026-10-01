@@ -27,11 +27,76 @@ enum AlertSeverity {
   CRITICAL
 }
 
+// Z5 — Configurable Information Alerts. The explicit, closed clinical/
+// product cause a persisted INFO Alert was created for — a nullable
+// column (not every Alert has one): every pre-Z5 Alert row (prediction-
+// generated HIGH/MODERATE/ANOMALY) remains `type = NULL` forever, never
+// retrofitted, and any FUTURE prediction-generated Alert also keeps
+// `type = NULL` — that branch's own `realtimeCategory` mechanism
+// (realtimeNotification.ts) is untouched by Z5 and deliberately not
+// unified with this enum. `type` exists purely to identify which of these
+// information events produced this row (for the NotificationPreference
+// realtime-delivery lookup AlertService performs, and for future display
+// refinement) — it is never used to derive severity (severity is passed
+// explicitly at creation, same as every other Alert, and is always INFO
+// for every value below).
+//
+// Z6-R2 §1/§2/§6/§7 — `INFO_DOCTOR_PROFILE_UPDATED` REMOVED. Editing a
+// doctor's own profile (name, cédula, especialidad, hospital, phone) is a
+// withdrawn product decision for a persisted information Alert — it no
+// longer creates one at all, and no replacement value is added. A forward
+// migration (20260930223000_remove_doctor_profile_info_alert) deletes any
+// historical rows of this type and safely recreates this Postgres enum
+// without it (Postgres cannot simply DROP an enum value) — see that
+// migration for the full reconciliation. Exactly three values remain.
+enum AlertType {
+  INFO_PATIENT_CREATED
+  INFO_PATIENT_UPDATED
+  INFO_HEALTH_RECORD_CREATED
+}
+
+// Y6.1 — three server-side states. SYSTEM is a first-class stored value
+// (not merely a frontend fallback when no preference exists) — it means
+// "explicitly follow the OS/browser color-scheme", distinct from a user who
+// has never saved a preference at all (handled the same lazy no-row way
+// NotificationPreference already is, not by ever writing SYSTEM implicitly).
+enum AppearanceTheme {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+// PRE-Y8 (Interface Size Preference) — a second, INDEPENDENT Appearance axis
+// alongside AppearanceTheme, deliberately NOT the removed Y6.3B/Y6.4B
+// interface-density/visibility PRESET system (that axis scaled many
+// individual per-component tokens; this one is a single global scale factor
+// applied uniformly via CSS `zoom` — see AppearanceContext.tsx/index.css).
+// ORIGINAL is the exact pre-existing baseline (scale 1.00, no visual change
+// from today), matching AppearanceTheme's own "SYSTEM is a first-class
+// stored default" precedent — ORIGINAL is likewise a real, explicit,
+// storable value, not merely "no preference set" (that lazy-no-row case is
+// handled the same way as theme's, via the GET route's own default object,
+// not by ever writing ORIGINAL implicitly).
+enum InterfaceSize {
+  ORIGINAL
+  MEDIUM
+  LARGE
+}
+
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 model User {
   id           String   @id @default(uuid())
-  email        String   @unique
+  // Z6-R1 — nullable so a doctor may register with phone only (no email at
+  // all). Uniqueness is preserved for every NON-null value — Postgres
+  // permits multiple NULL rows under a plain UNIQUE constraint/index, so
+  // "no email" never conflicts with another "no email" account. Every
+  // existing account keeps its real, non-null email unchanged. The
+  // product invariant this supports (every MEDICO has email != null OR
+  // medico.phone != null) is enforced in application code (auth.dto.ts's
+  // RegisterDto superRefine + user.routes.ts's PATCH /me/profile lockout
+  // check below), never as a DB CHECK spanning User + Medico.
+  email        String?  @unique
   passwordHash String   @map("password_hash")
   firstName    String   @map("first_name")
   lastName     String   @map("last_name")
@@ -45,33 +110,143 @@ model User {
   healthRecords   HealthRecord[]   @relation("CreatedByUser")
   refreshTokens   RefreshToken[]
   notificationPreference NotificationPreference?
+  appearancePreference   AppearancePreference?
+  // Y3.1B — one row max per user (Y3.1A-FIX1 storage decision: Postgres
+  // binary storage, never bytes inline on this row). Absence of a related
+  // row IS "no avatar" — no boolean flag duplicates that fact.
+  avatarImage     AvatarImage?
 
   @@map("users")
 }
 
+// Y5.2 — rebuilt for the stable-session refresh architecture. `id` IS the
+// session id ("sid") embedded in the refresh JWT — it is generated in
+// application code (crypto.randomUUID(), see lib/session.ts) BEFORE the JWT
+// containing it is signed, then passed explicitly as `id` on create (not
+// left to Prisma's own @default(uuid()), which only applies when the field
+// is omitted). Rotation (POST /auth/refresh) always UPDATEs this same row in
+// place — the row's identity/creation history never changes across
+// rotations, which is what makes it possible to preserve "this session"
+// through Y5.1's adapted password-change flow and to list/revoke sessions
+// individually (Y5.2 §Session Management). The raw refresh credential itself
+// is NEVER persisted — only a SHA-256 hash of it (`tokenHash`), so a DB read
+// (or leak) can never be replayed as a live refresh credential.
 model RefreshToken {
-  id        String   @id @default(uuid())
-  token     String   @unique
-  userId    String   @map("user_id")
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  tokenHash  String   @map("token_hash")
+  // Raw request header string only (`req.headers['user-agent']`), captured
+  // once at session creation — never parsed, geolocated, or fingerprinted.
+  // Nullable: the header can legitimately be absent.
+  userAgent  String?  @map("user_agent")
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  // Set at creation, updated ONLY on a successful refresh (never on every
+  // ordinary authenticated API request) — see lib/session.ts.
+  lastUsedAt DateTime @default(now()) @map("last_used_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // Supports GET /users/me/sessions (list this user's active sessions).
+  @@index([userId])
   @@map("refresh_tokens")
 }
 
+// Y4 — rebuilt for the final Phase-Y Notifications contract: three
+// independent realtime-delivery toggles, one per Alert cause. `highRiskAlerts`
+// is RENAMED (not dropped+recreated) to `highRiskRealtime` so existing users'
+// values survive (see the Y4 migration). `weeklySummary` is intentionally
+// removed — that feature was never actually implemented, and Phase Y
+// explicitly dropped the contract; its data is discarded, not migrated
+// anywhere (Y4 §8).
 model NotificationPreference {
-  id             String   @id @default(uuid())
-  userId         String   @unique @map("user_id")
-  highRiskAlerts Boolean  @default(true)  @map("high_risk_alerts")
-  weeklySummary  Boolean  @default(false) @map("weekly_summary")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt      @map("updated_at")
+  id                   String   @id @default(uuid())
+  userId               String   @unique @map("user_id")
+  highRiskRealtime     Boolean  @default(true) @map("high_risk_realtime")
+  moderateRiskRealtime Boolean  @default(true) @map("moderate_risk_realtime")
+  anomalyRealtime      Boolean  @default(true) @map("anomaly_realtime")
+  // Z5 — four independent realtime-delivery toggles, one per Configurable
+  // Information Alert event, following the EXACT same pattern the three
+  // risk/anomaly fields above already established (Y4): each gates ONLY
+  // the optional `new_alert` Socket.IO popup for its event — never Alert
+  // persistence (the Alert row is always created — see AlertService/
+  // realtimeNotification.ts) and never `alerts_changed` (always emitted
+  // regardless). @default(true) so every EXISTING user — who has a
+  // NotificationPreference row from before Z5, or has none at all yet
+  // (the lazy-no-row GET default, see user.routes.ts) — starts with all
+  // four new information alerts enabled, identical in spirit to how
+  // highRiskRealtime/moderateRiskRealtime/anomalyRealtime already default
+  // to true. The Z5 migration adds these as a plain column default, which
+  // Postgres applies to already-existing rows in the same ADD COLUMN
+  // statement — no separate backfill needed.
+  patientCreatedRealtime         Boolean @default(true) @map("patient_created_realtime")
+  patientUpdatedRealtime         Boolean @default(true) @map("patient_updated_realtime")
+  healthRecordCreatedRealtime    Boolean @default(true) @map("health_record_created_realtime")
+  // Z6-R2 §5/§6 — `doctorProfileUpdatedRealtime` REMOVED (column dropped by
+  // the same forward migration that reconciles AlertType, see its enum's
+  // own comment above): the one event it gated no longer exists as a
+  // product decision, so there is nothing left for this toggle to control.
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt      @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("notification_preferences")
+}
+
+// Y6.1 — mirrors NotificationPreference's exact structural pattern (one row
+// per user, unique userId, lazy creation only on first PATCH). `theme`
+// defaults to SYSTEM at the column level for symmetry with the app-level
+// lazy default the GET route returns when no row exists yet — the two are
+// deliberately kept in agreement so a future direct-DB read never disagrees
+// with what the API has always told this user.
+model AppearancePreference {
+  id        String          @id @default(uuid())
+  userId    String          @unique @map("user_id")
+  theme     AppearanceTheme @default(SYSTEM)
+  // PRE-Y8 (Interface Size Preference) — additive column, non-destructive to
+  // any existing row: every pre-existing AppearancePreference row implicitly
+  // became ORIGINAL (the exact then-current baseline) via the column
+  // default, applied by the PRE-Y8 migration itself (ADD COLUMN ... NOT
+  // NULL DEFAULT 'ORIGINAL' backfilled existing rows in that same
+  // statement — no separate data migration/backfill script needed or
+  // written then).
+  //
+  // Z4 / PRISMA GATE P2 — the column default changed from ORIGINAL to
+  // MEDIUM (set_interface_size_default_medium migration), matching the
+  // already-implemented Z4 application-level default. This is a
+  // default-only change: it affects only a future INSERT that omits
+  // interfaceSize. It is NOT a backfill — every row's already-stored
+  // explicit value (ORIGINAL, MEDIUM, or LARGE) is left exactly as is.
+  interfaceSize InterfaceSize @default(MEDIUM) @map("interface_size")
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt      @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("appearance_preferences")
+}
+
+// Y3.1B — profile-image binary storage (Y3.1A/Y3.1A-FIX1 architecture,
+// implemented here exactly as frozen). One row per user, never inline on
+// User (Y3.1A §"never put raw avatar bytes on User"). `data` is read ONLY
+// by the dedicated GET /users/me/avatar route — every other Prisma query
+// touching a user (auth bootstrap, profile GET/PATCH) selects `updatedAt`
+// alone, never `data` (Y3.1A-FIX1 §19/§25, Y3.1B §19/§42). Absence of a row
+// is the sole "no avatar" signal — no separate boolean. onDelete: Cascade
+// so a deleted User (if that ever happens) never leaves an orphaned image.
+model AvatarImage {
+  id        String   @id @default(uuid())
+  userId    String   @unique @map("user_id")
+  data      Bytes
+  mimeType  String   @map("mime_type")
+  byteSize  Int      @map("byte_size")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("avatar_images")
 }
 
 model Medico {
@@ -80,10 +255,34 @@ model Medico {
   cedulaProfesional  String?  @unique @map("cedula_profesional")
   especialidad       String?
   hospital           String?
+  // Z6 — optional doctor contact phone, professional/personal profile
+  // information belonging to Medico (not User — User.email is the
+  // login/auth identity, a completely separate concern). Nullable, no
+  // unique constraint, no default/backfill: every existing Medico row
+  // simply gets `phone = NULL`. Persisted form is E.164 (see
+  // lib/phone.ts::isCanonicalPhone, the exact same contract Paciente.phone
+  // already uses) — enforced at the DTO layer (user.routes.ts's
+  // UpdateMyProfileDto), not here.
+  //
+  // Z6-R1 — now also a LOGIN IDENTIFIER (a doctor may authenticate by
+  // phone, see auth.service.ts), so it must resolve to at most one Medico:
+  // `@unique`. Still nullable — a doctor may register/operate with email
+  // only and no phone at all. Not made globally required; the "at least
+  // one of email/phone" invariant lives in application code, not here.
+  phone              String?  @unique
   createdAt          DateTime @default(now()) @map("created_at")
 
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   pacientes Paciente[]
+  // Z5 — direct doctor-scoped Alert ownership, for an Alert that has no
+  // legitimate patient to attach to. See Alert model below for the full
+  // ownership design. Z6-R2 — the one event that ever populated this path
+  // (INFO_DOCTOR_PROFILE_UPDATED) was removed as a product decision; this
+  // relation/column and AlertRepository's doctor-scoped ownership query are
+  // left in place as generic, currently-unused infrastructure (not
+  // something named after the removed feature itself) rather than removed
+  // — no live AlertType value creates a doctor-scoped Alert today.
+  alerts    Alert[]
 
   @@map("medicos")
 }
@@ -97,7 +296,38 @@ model Paciente {
   sex       Int      // 0 = Female, 1 = Male
   curp      String?  @unique
   phone     String?
+  // Z6 — optional patient contact email. CONTACT INFORMATION only — this
+  // patient is not a User account and this has no relationship to
+  // login/auth (User.email, unique/required there). Nullable, no unique
+  // constraint, no default/backfill: every existing Paciente row simply
+  // gets `email = NULL`. Normalized (trim + lowercase) at the DTO layer
+  // (patient.dto.ts) before it ever reaches Prisma.
+  email     String?
   isActive  Boolean  @default(true) @map("is_active")
+  // Z8 — PATIENT LIFECYCLE & VISIBILITY MANAGEMENT. CardioSense never
+  // deletes a patient (physically or logically) — isActive/isHidden are the
+  // only two lifecycle/visibility axes, and they are DELIBERATELY SEPARATE
+  // product concepts, not one combined status:
+  //   isActive=true,  isHidden=false -> ACTIVE (normal, full clinical use)
+  //   isActive=false, isHidden=false -> INACTIVE_VISIBLE (no new clinical
+  //                                     activity; fully visible/browsable;
+  //                                     reversible via the status endpoint)
+  //   isActive=false, isHidden=true  -> INACTIVE_HIDDEN (fully preserved,
+  //                                     excluded from every normal
+  //                                     operational surface; reversible only
+  //                                     through dedicated visibility-
+  //                                     management endpoints/UI)
+  // isActive=true + isHidden=true is an INVALID state application code must
+  // never intentionally create — enforced entirely at the service layer
+  // (patient.service.ts: the status endpoint rejects reactivating a hidden
+  // patient; the visibility endpoint requires isActive=false to hide, and
+  // SHOW never flips isActive back to true), not by a DB-level CHECK
+  // constraint — only the one column this block authorizes was added, no
+  // schema object beyond it. No deletedAt/hiddenAt/purgedAt/restoreToken —
+  // none proved necessary: deactivating/hiding is reversible by construction
+  // (the status/visibility endpoints themselves), so no restore workflow or
+  // "when was this hidden" audit timestamp is needed yet.
+  isHidden  Boolean  @default(false) @map("is_hidden")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -106,6 +336,14 @@ model Paciente {
   predictions   Prediction[]
   alerts        Alert[]
 
+  // Z8 — no new index added for isHidden/isActive filtering. The existing
+  // @@index([medicoId]) above already makes every Z8 query (the Patients
+  // list's ACTIVE/INACTIVE/ALL filter, the hidden-patient management
+  // surface) an index-backed scan on medicoId with isActive/isHidden as
+  // residual in-memory predicates — this project's current scale (patients
+  // per doctor) gives no concrete, observed reason to add a speculative
+  // composite index on top of that, per this block's own instruction not to
+  // add one without one.
   @@index([medicoId])
   @@map("pacientes")
 }
@@ -158,19 +396,61 @@ model Prediction {
   @@map("predictions")
 }
 
+// Z5 — Configurable Information Alerts extended this model's ownership
+// shape. Pre-Z5, every Alert was implicitly patient-scoped (patientId was
+// NOT NULL). One of the Z5 events — INFO_DOCTOR_PROFILE_UPDATED, since
+// removed by Z6-R2 — had no legitimate patient at all (it was about the
+// doctor's own profile), so `patientId` became nullable and a second,
+// independent ownership path was added: `medicoId`, direct doctor
+// ownership, for exactly that case. This is NOT a redesign of
+// patient-scoped Alerts — every prediction-generated and
+// INFO_PATIENT_*/INFO_HEALTH_RECORD_CREATED Alert continues to set
+// patientId exactly as before, with medicoId left null.
+//
+// Z6-R2 — no current AlertType value ever populates the doctor-scoped
+// path anymore (its one producer was removed), but `medicoId` and the
+// ownership mechanism below are kept as generic infrastructure for any
+// future doctor-scoped Alert, not removed merely because their one past
+// user was withdrawn.
+//
+// Invariant enforced by application code (AlertService.createInformationAlert),
+// not a DB CHECK constraint (no other model in this schema uses one, so
+// none is introduced here — see PRISMA GATE P2 precedent of minimal,
+// focused changes): every Alert must have exactly one ownership path
+// populated —
+//   PATIENT-SCOPED:  patientId != null, medicoId == null
+//   DOCTOR-SCOPED:   patientId == null, medicoId != null
+// — never both null. AlertRepository's doctor-visibility queries
+// (findByMedico/findById/markRead/markAllRead) read EITHER path: an Alert
+// belongs to the current doctor when `patient.medicoId == currentMedicoId`
+// OR `alert.medicoId == currentMedicoId`, never broader.
 model Alert {
   id           String        @id @default(uuid())
-  patientId    String        @map("patient_id")
+  patientId    String?       @map("patient_id")
+  // Z5 — direct doctor ownership path. Z6-R2 — its one producer
+  // (INFO_DOCTOR_PROFILE_UPDATED) was removed; no live code sets this
+  // anymore, but the column/mechanism is preserved as generic
+  // infrastructure (see model comment above). Left null for every
+  // patient-scoped Alert, as always.
+  medicoId     String?       @map("medico_id")
   predictionId String?       @map("prediction_id")
+  // Z5 — nullable: NULL for every pre-Z5 row and for every prediction-
+  // generated HIGH/MODERATE/ANOMALY Alert going forward (that branch
+  // keeps using its own realtimeCategory mechanism, untouched by Z5 — see
+  // the AlertType enum comment above). Set to one of the AlertType values
+  // ONLY by AlertService.createInformationAlert.
+  type         AlertType?
   severity     AlertSeverity
   message      String
   isRead       Boolean       @default(false) @map("is_read")
   createdAt    DateTime      @default(now()) @map("created_at")
 
-  patient    Paciente    @relation(fields: [patientId], references: [id])
+  patient    Paciente?   @relation(fields: [patientId], references: [id])
+  medico     Medico?     @relation(fields: [medicoId], references: [id])
   prediction Prediction? @relation(fields: [predictionId], references: [id])
 
   @@index([patientId])
+  @@index([medicoId])
   @@index([isRead])
   @@map("alerts")
 }

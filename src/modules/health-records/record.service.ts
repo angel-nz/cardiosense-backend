@@ -1,12 +1,13 @@
 import { prisma } from '@/config/prisma'
 import {
-  NotFoundError, ForbiddenError, ModelIneligibleError,
+  NotFoundError, ForbiddenError, ModelIneligibleError, PatientInactiveError,
   ServiceUnavailableError, AIInputRejectedError, AIServiceError,
 } from '@/lib/errors'
 import { logger } from '@/lib/logger'
 import { calculateAge } from '@/lib/age'
 import { HealthRecordRepository } from './record.repository'
 import { PredictionService } from '@/modules/predictions/prediction.service'
+import { AlertService } from '@/modules/alerts/alert.service'
 import type { CreateRecordDtoType } from './record.dto'
 import type { Server as IOServer } from 'socket.io'
 
@@ -25,7 +26,18 @@ export class HealthRecordService {
   async create(userId: string, dto: CreateRecordDtoType) {
     // Verify patient belongs to this doctor — now returns the owned Patient
     // (U3.2) so age derivation below reuses it instead of a second query.
+    // assertPatientOwnership() below already excludes isHidden=true patients
+    // (treated as not found) — see its own comment.
     const patient = await this.assertPatientOwnership(userId, dto.patientId)
+
+    // Z8 §28 — a resolved-but-INACTIVE patient (isActive=false,
+    // isHidden=false — otherwise assertPatientOwnership above would already
+    // have thrown NotFoundError) may not receive new clinical activity.
+    // Thrown BEFORE any HealthRecord insert and BEFORE the automatic
+    // prediction kickoff below — no partial write, no
+    // INFO_HEALTH_RECORD_CREATED, no AI call for an inactive patient.
+    if (!patient.isActive) throw new PatientInactiveError()
+
     // U3.2 / V-AGE-FIX-2 §3 — age is backend-authoritative, derived from
     // Paciente.birthDate at persistence time (this record's own observation
     // moment). `recordedAt` was previously left to Prisma's `@default(now())`
@@ -58,6 +70,24 @@ export class HealthRecordService {
     this.io?.to(`user:${userId}`).emit('dashboard_activity_changed', {
       patientId:  record.patientId,
       eventDate:  record.recordedAt,
+    })
+
+    // Z5 — INFO_HEALTH_RECORD_CREATED. Created exactly once, ONLY after
+    // repo.create() above already succeeded (a failed creation throws
+    // before reaching this line). `patient` is the already-loaded owned
+    // Patient from assertPatientOwnership() above — no extra query needed
+    // for the message/patientName. Deliberately does NOT touch automatic-
+    // prediction behavior below in any way — this Alert is about the
+    // HealthRecord itself, not about whatever the AI service later decides
+    // (a HIGH/MODERATE/ANOMALY prediction Alert, if any, is a fully
+    // separate Alert created independently by PredictionService).
+    const alertSvc = new AlertService(this.io)
+    await alertSvc.createInformationAlert({
+      type:         'INFO_HEALTH_RECORD_CREATED',
+      patientId:    record.patientId,
+      medicoUserId: userId,
+      patientName:  `${patient.firstName} ${patient.lastName}`,
+      message:      `Se registró un nuevo registro clínico para ${patient.firstName} ${patient.lastName}.`,
     })
 
     // Q2 — automatic prediction. Deliberately NOT awaited: the HealthRecord
@@ -177,12 +207,21 @@ export class HealthRecordService {
     return repo.findLatestByPatient(patientId)
   }
 
+  // Z8 §26 — the one shared ownership-resolution lookup for this module;
+  // every caller (create/listByPatient/getOne/getLatest) inherits hidden-
+  // exclusion from here automatically. A hidden patient behaves exactly
+  // like a nonexistent one (NotFoundError), never a distinguishable
+  // rejection — no "exists but hidden" leak. isActive is deliberately NOT
+  // checked here (an INACTIVE_VISIBLE patient is still a real, resolvable,
+  // owned patient for READ purposes — see getOne/listByPatient/getLatest,
+  // which must keep working for it); the isActive gate lives only in
+  // create() above, which is the one write path this module has.
   private async assertPatientOwnership(userId: string, patientId: string) {
     const medico = await prisma.medico.findUnique({ where: { userId } })
     if (!medico) throw new ForbiddenError('Only doctors can access health records')
 
     const patient = await prisma.paciente.findFirst({
-      where: { id: patientId, medicoId: medico.id },
+      where: { id: patientId, medicoId: medico.id, isHidden: false },
     })
     if (!patient) throw new NotFoundError('Patient')
     return patient

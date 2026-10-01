@@ -6,7 +6,12 @@
 // event shape, and derives RISK_CHANGE from consecutive Predictions —
 // nothing here writes to the database.
 
-export type TimelineEventType = 'CLINICAL_RECORD' | 'PREDICTION' | 'ALERT' | 'RISK_CHANGE'
+// Z2 — 'ALERT' removed: no calendar/timeline endpoint produces Alert-model
+// events anymore (dashboard.service.ts::getCalendar / patient.service.ts::
+// getTimeline). This is calendar-specific — the Alerts subsystem itself
+// (alerts module, AlertsPage, realtime AlertToast) is untouched and keeps
+// its own Alert types.
+export type TimelineEventType = 'CLINICAL_RECORD' | 'PREDICTION' | 'RISK_CHANGE'
 
 interface ClinicalRecordMetadata {
   healthRecordId: string
@@ -22,14 +27,6 @@ interface PredictionMetadata {
   isAnomaly: boolean
   anomalyScore: number | null
   modelVersion: string | null
-}
-
-interface AlertMetadata {
-  alertId: string
-  predictionId: string | null
-  severity: string
-  message: string
-  isRead: boolean
 }
 
 interface RiskChangeMetadata {
@@ -65,15 +62,6 @@ export interface PredictionTimelineEvent {
   groupId?: string | null
 }
 
-export interface AlertTimelineEvent {
-  id: string
-  patientId: string
-  eventType: 'ALERT'
-  eventDate: string
-  metadata: AlertMetadata
-  groupId?: string | null
-}
-
 export interface RiskChangeTimelineEvent {
   id: string
   patientId: string
@@ -86,7 +74,6 @@ export interface RiskChangeTimelineEvent {
 export type PatientTimelineEvent =
   | ClinicalRecordTimelineEvent
   | PredictionTimelineEvent
-  | AlertTimelineEvent
   | RiskChangeTimelineEvent
 
 // ─── Source row shapes (only the fields these mappers actually read) ──────
@@ -109,22 +96,6 @@ interface PredictionRow {
   isAnomaly: boolean
   anomalyScore: unknown
   modelVersion: string | null
-}
-
-interface AlertRow {
-  id: string
-  patientId: string
-  predictionId: string | null
-  createdAt: Date
-  severity: string
-  message: string
-  isRead: boolean
-  // W2.2 — only present when the caller's query included this relation
-  // (alert.repository.ts::findInRangeForPatient / dashboard.repository.ts::
-  // findAlertsInRange, both updated for W2.2). `null` covers both "Alert
-  // has no linked Prediction" and "that Prediction has no linked
-  // HealthRecord" — toAlertEvent below treats both identically (no group).
-  prediction?: { healthRecordId: string | null } | null
 }
 
 // ─── groupId derivation (W2.2) ─────────────────────────────────────────────
@@ -199,36 +170,10 @@ export function toPredictionEvent(prediction: PredictionRow): PredictionTimeline
   }
 }
 
-// ALERT — source: Alert. Date: createdAt (Alert has no other date field).
-// Identity: the Alert's own id. predictionId is nullable on the model —
-// the current AlertService.create() call site always supplies one, but
-// this mapper respects the schema's real nullability rather than the
-// service's current guarantee (section 13). No proximity-based inference
-// of a missing link — never attempted here.
-export function toAlertEvent(alert: AlertRow): AlertTimelineEvent {
-  return {
-    id: alert.id,
-    patientId: alert.patientId,
-    eventType: 'ALERT',
-    eventDate: alert.createdAt.toISOString(),
-    metadata: {
-      alertId: alert.id,
-      predictionId: alert.predictionId,
-      severity: alert.severity,
-      message: alert.message,
-      isRead: alert.isRead,
-    },
-    // W2.2 — groupable only when the linked Prediction (via alert.predictionId)
-    // itself has a linked HealthRecord — a two-hop, doubly-optional chain.
-    // `alert.prediction` is only populated when the caller's query included
-    // it (both range queries now do — see alert.repository.ts/
-    // dashboard.repository.ts). No raw healthRecordId is added to
-    // AlertMetadata itself — the derived groupId is sufficient.
-    groupId: alert.prediction?.healthRecordId
-      ? buildHealthRecordGroupId(alert.patientId, alert.prediction.healthRecordId)
-      : null,
-  }
-}
+// Z2 — the ALERT mapper (toAlertEvent) was removed here: no calendar/
+// timeline endpoint produces Alert-model events anymore. The Alert entity
+// itself, and its own subsystem mapping (AlertsPage/alert.service.ts/
+// alert.repository.ts), are untouched.
 
 // ─── RISK_CHANGE derivation (P2.9) ─────────────────────────────────────────
 //
@@ -309,7 +254,6 @@ const TYPE_PRIORITY: Record<TimelineEventType, number> = {
   CLINICAL_RECORD: 0,
   PREDICTION: 1,
   RISK_CHANGE: 2,
-  ALERT: 3,
 }
 
 export function sortTimelineEvents(events: PatientTimelineEvent[]): PatientTimelineEvent[] {

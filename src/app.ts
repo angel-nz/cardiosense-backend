@@ -1,6 +1,7 @@
 import express from 'express'
 import helmet from 'helmet'
 import cors from 'cors'
+import cookieParser from 'cookie-parser'
 import compression from 'compression'
 import morgan from 'morgan'
 import mongoSanitize from 'express-mongo-sanitize'
@@ -32,6 +33,14 @@ export function createApp(io?: IOServer) {
     methods:     ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   }))
+
+  // ─── Cookie parsing (Y5.2 — reads the HttpOnly refresh-session cookie) ──
+  // No secret passed to cookie-parser: this app does not use its built-in
+  // signed-cookie feature — the refresh cookie's integrity comes from it
+  // being a signed JWT (verified in lib/jwt.ts), not from cookie-parser's
+  // own signing, so introducing a second, redundant signing mechanism here
+  // would add complexity with no real protection gained.
+  app.use(cookieParser())
 
   // ─── Body parsing ───────────────────────────────────────────────
   app.use(express.json({ limit: '10kb' }))

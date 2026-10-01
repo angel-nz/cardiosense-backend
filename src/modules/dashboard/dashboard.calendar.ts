@@ -4,21 +4,21 @@
 // Patient Timeline is a single-patient context and never needed
 // `patientName`; forcing it in there would leak a Dashboard-only concern
 // into an already-closed, validated module. This intersection reuses the
-// full discriminated union (CLINICAL_RECORD/PREDICTION/RISK_CHANGE/ALERT)
-// as-is — TypeScript correctly distributes `& {patientName}` over each
-// member, so discriminated narrowing on `eventType` still works.
+// full discriminated union (CLINICAL_RECORD/PREDICTION/RISK_CHANGE) as-is —
+// TypeScript correctly distributes `& {patientName}` over each member, so
+// discriminated narrowing on `eventType` still works.
 import type { PatientTimelineEvent, TimelineEventType } from '@/modules/patients/patient.timeline'
 
 export type DashboardCalendarEvent = PatientTimelineEvent & { patientName: string }
 
 // Same priority P2 uses (patient.timeline.ts's own TYPE_PRIORITY is
 // module-private, not exported — this is an intentional, small, documented
-// duplication of a 4-entry lookup table rather than modifying P2's file).
+// duplication of this lookup table rather than modifying P2's file).
+// Z2 — ALERT entry removed along with the union member it prioritized.
 const TYPE_PRIORITY: Record<TimelineEventType, number> = {
   CLINICAL_RECORD: 0,
   PREDICTION: 1,
   RISK_CHANGE: 2,
-  ALERT: 3,
 }
 
 // Global order across MULTIPLE patients: eventDate ASC → type priority →

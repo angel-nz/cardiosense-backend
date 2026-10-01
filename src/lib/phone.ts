@@ -14,6 +14,7 @@
 //     .format('E.164')` exactly. A syntactically parseable but
 //     differently-formatted value (e.g. "+52 33 1234 5678" with spaces) is
 //     REJECTED as a new/changed write — see isCanonicalPhone below.
+import { z } from 'zod'
 import { parsePhoneNumberFromString } from 'libphonenumber-js'
 
 // Fast structural guard only — NOT a source of validity/country truth.
@@ -49,3 +50,42 @@ export function parseValidPhone(value: string) {
   if (!parsed || !parsed.isValid() || parsed.ext) return null
   return parsed
 }
+
+// Z6-FIX1 — generic Zod wrapper around isCanonicalPhone above, moved here
+// (out of modules/patients/patient.dto.ts) so "a field requiring a
+// canonical E.164 phone" is reusable infrastructure, not something that
+// semantically belongs to the Patients module. patient.dto.ts (Paciente.
+// phone, Create) and user.routes.ts (Medico.phone, PATCH /me/profile) both
+// consume this — neither defines its own parallel phone validator.
+export const PHONE_MESSAGE = 'Phone must be a valid canonical international number (E.164 format, e.g. +523312345678), with no spaces or punctuation'
+export const CanonicalPhoneField = z.string().max(20).superRefine((value, ctx) => {
+  if (!isCanonicalPhone(value)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: PHONE_MESSAGE })
+  }
+})
+
+// Z6-FIX1 — nullable variant implementing the FULL Z6 PATCH contract for a
+// field whose backend validation must stand on its own (not merely rely on
+// the frontend always converting a blank UI state to `null` before it ever
+// reaches here):
+//   omitted              → leave unchanged (`.optional()`)
+//   null                  → clear (bypasses the inner schema entirely)
+//   "" / whitespace-only  → normalized to `null` and cleared, NOT rejected
+//   valid canonical E.164 → persisted
+//   invalid non-empty     → validation error (PHONE_MESSAGE)
+// `z.preprocess` runs the blank→null normalization BEFORE
+// CanonicalPhoneField's own `.max()`/superRefine checks, so those only ever
+// see either `null` (short-circuited by `.nullable()`) or an already
+// non-blank, trimmed string — E.164 validation itself is never weakened.
+// Currently consumed by user.routes.ts's doctor-phone PATCH field; Paciente
+// Create/Update keep their own existing, documented phone semantics
+// unchanged (see patient.dto.ts/patient.service.ts) — this export is
+// additive, not a replacement for those.
+export const NullableCanonicalPhoneField = z.preprocess(
+  (val) => {
+    if (typeof val !== 'string') return val
+    const trimmed = val.trim()
+    return trimmed === '' ? null : trimmed
+  },
+  CanonicalPhoneField.nullable(),
+).optional()

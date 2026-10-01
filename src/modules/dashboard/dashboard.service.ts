@@ -3,7 +3,7 @@ import { ForbiddenError } from '@/lib/errors'
 import { startOfLocalDay, startOfLocalWeek, addDays, toLocalISODate } from '@/lib/timezone'
 import { DashboardRepository } from './dashboard.repository'
 import {
-  toClinicalRecordEvent, toPredictionEvent, toAlertEvent, deriveRiskChanges,
+  toClinicalRecordEvent, toPredictionEvent, deriveRiskChanges,
 } from '@/modules/patients/patient.timeline'
 import { sortDashboardCalendarEvents, type DashboardCalendarEvent } from './dashboard.calendar'
 
@@ -91,12 +91,13 @@ export class DashboardService {
   async getCalendar(userId: string, from?: Date, to?: Date): Promise<DashboardCalendarEvent[]> {
     const medico = await this.getMedicoOrThrow(userId)
 
-    // 4 independent, medico-scoped queries in parallel (O1.18/section 30/31).
-    const [patients, records, predictionsInRange, alerts] = await Promise.all([
+    // Z2 — Alert-model events removed from the Dashboard calendar (was a
+    // 4th parallel query, repo.findAlertsInRange; RISK_CHANGE is unaffected
+    // — it is derived from Predictions, not read from the Alert table).
+    const [patients, records, predictionsInRange] = await Promise.all([
       repo.findPatientIdentities(medico.id),
       repo.findRecordsInRange(medico.id, from, to),
       repo.findPredictionsInRange(medico.id, from, to),
-      repo.findAlertsInRange(medico.id, from, to),
     ])
 
     const patientNameById = new Map(patients.map(p => [p.id, `${p.firstName} ${p.lastName}`]))
@@ -137,12 +138,11 @@ export class DashboardService {
 
     const clinicalEvents = records.map(toClinicalRecordEvent)
     const predictionEvents = predictionsInRange.map(toPredictionEvent)
-    const alertEvents = alerts.map(toAlertEvent)
 
     // Section 34 — decorate AFTER reusing P2's mappers as-is; patientName
     // never touches patient.timeline.ts's own types/functions.
     const decorated: DashboardCalendarEvent[] = [
-      ...clinicalEvents, ...predictionEvents, ...alertEvents, ...riskChangeEvents,
+      ...clinicalEvents, ...predictionEvents, ...riskChangeEvents,
     ].map(event => ({
       ...event,
       patientName: patientNameById.get(event.patientId) ?? 'Paciente',

@@ -2,7 +2,13 @@ import type { Request, Response, NextFunction } from 'express'
 import type { AuthRequest } from '@/types'
 import type { Server as IOServer } from 'socket.io'
 import { PatientService } from './patient.service'
-import type { HistoryQueryDtoType } from './patient.dto'
+import type {
+  HistoryQueryDtoType,
+  PatientStatusDtoType,
+  PatientVisibilityDtoType,
+  HiddenPatientQueryDtoType,
+  BulkVisibilityDtoType,
+} from './patient.dto'
 
 export function createPatientController(io?: IOServer) {
   const svc = new PatientService(io)
@@ -35,10 +41,59 @@ export function createPatientController(io?: IOServer) {
     } catch (err) { next(err) }
   }
 
-  const deactivate = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  // Z8 — PATCH /patients/:id/status. The one explicit lifecycle mutation —
+  // isActive:false deactivates, isActive:true reactivates. Replaces the old
+  // DELETE-based `deactivate` handler entirely (see patient.routes.ts — the
+  // DELETE /:id route itself is removed, Z8 §6/§47).
+  const setStatus = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
-      await svc.deactivate(req.user.sub, req.params.id)
-      res.json({ success: true })
+      const { isActive } = req.body as PatientStatusDtoType
+      const patient = await svc.setStatus(req.user.sub, req.params.id, isActive)
+      res.json(patient)
+    } catch (err) { next(err) }
+  }
+
+  // Z8 — PATCH /patients/:id/visibility. isHidden:true hides (requires the
+  // patient already inactive — PatientMustBeInactiveToHideError otherwise),
+  // isHidden:false shows (never reactivates — Z8 §10/§22).
+  const setVisibility = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { isHidden } = req.body as PatientVisibilityDtoType
+      const patient = isHidden
+        ? await svc.hide(req.user.sub, req.params.id)
+        : await svc.show(req.user.sub, req.params.id)
+      res.json(patient)
+    } catch (err) { next(err) }
+  }
+
+  // Z8 — PATCH /patients/inactive/visibility. Bulk hide-all-inactive /
+  // show-all-hidden for the current doctor. Returns { affectedCount }, never
+  // one notification/row per patient (Z8 §19/§20).
+  const bulkSetVisibility = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { isHidden } = req.body as BulkVisibilityDtoType
+      const result = await svc.bulkSetVisibility(req.user.sub, isHidden)
+      res.json(result)
+    } catch (err) { next(err) }
+  }
+
+  // Z8 — GET /patients/visibility/hidden. The Settings -> Pacientes hidden
+  // list. Minimal patient summary only (Z8 §17) — no clinical data.
+  const listHidden = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const opts = req.query as unknown as HiddenPatientQueryDtoType
+      const result = await svc.listHidden(req.user.sub, opts)
+      res.json(result)
+    } catch (err) { next(err) }
+  }
+
+  // Z8 — GET /patients/visibility/summary. Counts for Settings -> Pacientes
+  // (visibleInactive/hiddenInactive) — intentionally NOT reused as Dashboard
+  // patient counts (Z8 §18).
+  const getVisibilitySummary = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const summary = await svc.getVisibilitySummary(req.user.sub)
+      res.json(summary)
     } catch (err) { next(err) }
   }
 
@@ -65,5 +120,9 @@ export function createPatientController(io?: IOServer) {
     } catch (err) { next(err) }
   }
 
-  return { list, getOne, create, update, deactivate, getHistory, getTimeline }
+  return {
+    list, getOne, create, update,
+    setStatus, setVisibility, bulkSetVisibility, listHidden, getVisibilitySummary,
+    getHistory, getTimeline,
+  }
 }

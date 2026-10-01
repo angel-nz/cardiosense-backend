@@ -123,7 +123,11 @@ export class PredictionRepository {
     const { page, limit, search, from, to, riskLevel } = opts
     const skip = (page - 1) * limit
 
-    const patientWhere: Prisma.PacienteWhereInput = { medicoId }
+    // Z8 §26/§31 — the global PredictionsPage history must exclude hidden
+    // patients' predictions exactly like every other normal operational
+    // surface (no isActive restriction here — an INACTIVE_VISIBLE patient's
+    // predictions remain part of this history).
+    const patientWhere: Prisma.PacienteWhereInput = { medicoId, isHidden: false }
     if (search) {
       // Collapse repeated internal whitespace (already trimmed by the DTO).
       const normalized = search.replace(/\s+/g, ' ')
@@ -172,9 +176,11 @@ export class PredictionRepository {
     return { data, total }
   }
 
+  // Z8 §26 — isHidden=false added to the patient relation filter, same
+  // hidden-exclusion as listAll() above.
   async findByIdForMedico(id: string, medicoId: string) {
     return prisma.prediction.findFirst({
-      where: { id, patient: { medicoId } },
+      where: { id, patient: { medicoId, isHidden: false } },
     })
   }
 

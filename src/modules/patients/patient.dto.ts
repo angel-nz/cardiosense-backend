@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { toLocalISODate } from '@/lib/timezone'
-import { isCanonicalPhone } from '@/lib/phone'
+// Z6-FIX1 — the generic canonical-phone Zod field now lives in lib/phone.ts
+// (reused by user.routes.ts too) rather than being defined/owned here.
+import { CanonicalPhoneField } from '@/lib/phone'
 
 // U8.6B — patient birthDate DATA-SANITY rule (not model eligibility): a
 // real calendar date that is not after today in the business timezone
@@ -33,12 +35,29 @@ const BirthDateField = z.string().superRefine((value, ctx) => {
 // .format('E.164') === value` (see lib/phone.ts::isCanonicalPhone) —
 // display-formatted ("+52 33 1234 5678"), malformed, impossible, or
 // arbitrary-text values are all rejected here, before the service layer.
-export const PHONE_MESSAGE = 'Phone must be a valid canonical international number (E.164 format, e.g. +523312345678), with no spaces or punctuation'
-const CanonicalPhoneField = z.string().max(20).superRefine((value, ctx) => {
-  if (!isCanonicalPhone(value)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: PHONE_MESSAGE })
-  }
-})
+// `CanonicalPhoneField`/`PHONE_MESSAGE` are imported from lib/phone.ts
+// above (Z6-FIX1) — this module re-uses them, it does not define them.
+
+// Z6 — patient email contract. Unlike phone, this field has NO pre-existing
+// legacy data to accommodate (it is brand new in this migration — every
+// Paciente row starts at `email = NULL`), so there is no need for phone's
+// own "resend-unchanged-legacy-value" service-layer escape hatch: Zod alone
+// can fully own normalization + validation for BOTH Create and Update.
+// Contract (§4): trim surrounding whitespace, lowercase before persistence,
+// empty/whitespace-only → null, syntactically valid email required
+// otherwise, max length 254. `z.preprocess` runs the trim/lowercase/empty→
+// null step BEFORE the inner schema's `.max()`/`.email()` checks, so those
+// checks only ever see either `null` (bypassed entirely by `.nullable()`)
+// or a already-normalized, non-empty string.
+export const PATIENT_EMAIL_MESSAGE = 'Invalid email address'
+const PatientEmailField = z.preprocess(
+  (val) => {
+    if (typeof val !== 'string') return val
+    const trimmed = val.trim()
+    return trimmed === '' ? null : trimmed.toLowerCase()
+  },
+  z.string().max(254, PATIENT_EMAIL_MESSAGE).email(PATIENT_EMAIL_MESSAGE).nullable(),
+).optional()
 
 export const CreatePatientDto = z.object({
   firstName: z.string().min(1).max(100),
@@ -47,6 +66,10 @@ export const CreatePatientDto = z.object({
   sex:       z.number().int().min(0).max(1),
   curp:      z.string().length(18).optional(),
   phone:     CanonicalPhoneField.optional(),
+  // Z6 — optional on Create: omitted or blank → null (no email required to
+  // create a patient); a syntactically invalid value is rejected (never
+  // silently accepted) — see PatientEmailField above.
+  email:     PatientEmailField,
 })
 
 export const UpdatePatientDto = z.object({
@@ -75,19 +98,97 @@ export const UpdatePatientDto = z.object({
   // (patient.service.ts), which has the current row to compare against.
   // See V6.2 report §1/§2/§10 for the full audit and rationale.
   phone:     z.string().max(20).nullable().optional(),
-  isActive:  z.boolean().optional(),
+  // Z6 — same PATCH semantics as every other nullable field here: omitted
+  // → don't touch; null or blank → clear to null; valid → normalize +
+  // persist. Unlike phone, no legacy-compat exception is needed (see
+  // PatientEmailField's own comment above) — this one field fully owns
+  // email validation for both Create and Update.
+  email:     PatientEmailField,
+  // Z8 — `isActive` REMOVED from this general-purpose DTO. Lifecycle state
+  // is no longer settable through the generic PUT /patients/:id — it has
+  // its own dedicated, explicit endpoint (PATCH /patients/:id/status,
+  // PatientStatusDto below), per Z8's "no endpoint should silently combine
+  // two product actions" principle. Confirmed by direct read of
+  // EditPatientModal.tsx before this change: it never sent `isActive` in
+  // its submit payload, so no existing frontend caller relied on this.
 })
+
+// Z8 — Patients-list lifecycle filter. ACTIVE (the default — matches
+// today's implicit "doctor opens Patients and sees the active roster"
+// expectation) / INACTIVE / ALL. Composes with search/risk exactly like
+// every other PatientQueryDto field — see patient.repository.ts::findAll
+// for the exact predicate each value maps to. Hidden patients are excluded
+// from the result set for EVERY one of these three values, always, at the
+// repository layer — never something this DTO or the caller can override
+// (there is deliberately no 'HIDDEN'/'INCLUDE_HIDDEN' option here; the only
+// way to see a hidden patient is the separate, dedicated hidden-patient
+// management surface below).
+export const PatientStatusFilter = z.enum(['ACTIVE', 'INACTIVE', 'ALL']).default('ACTIVE')
 
 export const PatientQueryDto = z.object({
   page:   z.coerce.number().int().min(1).default(1),
   limit:  z.coerce.number().int().min(1).max(100).default(20),
   search: z.string().optional(),
   risk:   z.enum(['LOW', 'MODERATE', 'HIGH']).optional(),
+  status: PatientStatusFilter,
 })
 
 export const PatientParamDto = z.object({
   id: z.string().uuid('Invalid patient id'),
 })
+
+// Z8 — PATCH /patients/:id/status. The ONE explicit, reversible lifecycle
+// mutation: `isActive: false` deactivates, `isActive: true` reactivates.
+// Never accepts/implies `isHidden` — see PatientVisibilityDto below, the
+// separate endpoint for that axis (Z8's "each product action remains
+// explicit" principle — this endpoint never silently shows+reactivates a
+// hidden patient in one call).
+export const PatientStatusDto = z.object({
+  isActive: z.boolean(),
+})
+
+// Z8 — PATCH /patients/:id/visibility. The ONE explicit, reversible
+// visibility mutation: `isHidden: true` hides (only valid for an already-
+// INACTIVE, currently-visible patient — see PatientService.hide()'s own
+// PatientMustBeInactiveToHideError), `isHidden: false` shows (only valid
+// for an already-hidden patient — see PatientService.show()). SHOW never
+// sets isActive back to true — reactivation remains a fully separate,
+// subsequent PATCH /patients/:id/status call (Z8 §9's required SHOW-then-
+// REACTIVATE sequence).
+export const PatientVisibilityDto = z.object({
+  isHidden: z.boolean(),
+})
+
+// Z8 — GET /patients/visibility/hidden (the Settings -> Pacientes hidden
+// list) and the visibility-summary counts both scope strictly to
+// isActive=false AND isHidden=true for the current doctor — this DTO is
+// deliberately minimal (no `risk`, no lifecycle `status` — this surface
+// only ever shows hidden patients, there is nothing to filter by lifecycle
+// state) per Z8 §17's "minimal patient summary... not another PatientDetail
+// implementation" instruction. `search` is included because the existing
+// paging/search infrastructure (the same contains/insensitive pattern
+// PatientQueryDto.search already uses) is trivially reusable here and the
+// hidden list can grow large enough that finding one patient by name is a
+// real, not speculative, management need.
+export const HiddenPatientQueryDto = z.object({
+  page:   z.coerce.number().int().min(1).default(1),
+  limit:  z.coerce.number().int().min(1).max(100).default(20),
+  search: z.string().optional(),
+})
+
+// Z8 — PATCH /patients/inactive/visibility (bulk hide-all-inactive /
+// show-all-hidden). Same shape as PatientVisibilityDto — one explicit
+// boolean, no partial/mixed semantics — but scoped by the service/
+// repository layer to "every currently-eligible row for this doctor" rather
+// than one patient id (see PatientService.bulkSetVisibility()).
+export const BulkVisibilityDto = z.object({
+  isHidden: z.boolean(),
+})
+
+export type PatientStatusDtoType     = z.infer<typeof PatientStatusDto>
+export type PatientVisibilityDtoType = z.infer<typeof PatientVisibilityDto>
+export type HiddenPatientQueryDtoType = z.infer<typeof HiddenPatientQueryDto>
+export type BulkVisibilityDtoType    = z.infer<typeof BulkVisibilityDto>
 
 // U5.2 — GET /patients/:id/history query. Whitelist of sortBy is exact and
 // closed (z.enum) — never arbitrary field interpolation. Applies only to
