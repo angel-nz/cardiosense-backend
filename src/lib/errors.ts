@@ -66,6 +66,18 @@ export class DuplicatePhoneError extends AppError {
   }
 }
 
+// PRE-R — PATCH /users/me/profile: User.email is now editable through this
+// route (previously read-only), so a second account's email is a genuine,
+// distinct conflict reachable from this same write — same shape/precedent
+// as DuplicateCedulaError/DuplicatePhoneError above (409, a dedicated code
+// the frontend can branch on), never identifying or otherwise leaking which
+// other account already owns the email.
+export class DuplicateEmailError extends AppError {
+  constructor() {
+    super('Este correo electrónico ya está registrado.', 409, 'DUPLICATE_EMAIL')
+  }
+}
+
 // Z8 — PATIENT LIFECYCLE & VISIBILITY MANAGEMENT.
 //
 // An INACTIVE_VISIBLE patient (isActive=false, isHidden=false) is a real,
@@ -179,22 +191,25 @@ export class PasswordUnchangedError extends AppError {
   }
 }
 
-// Z6-R1 §2/§17 — PATCH /users/me/profile: the caller asked to clear
-// Medico.phone (set it to null) while this account's User.email is ALREADY
-// null. Phone is this account's only login identifier in that state, so
-// clearing it would leave the account with zero ways to authenticate — a
-// self-inflicted lockout. 400 (a business-rule validation failure, same
-// status family as ValidationError), but its own distinct code so the
-// frontend can route this specifically to the phone field rather than a
-// generic banner (same reasoning as DuplicateCedulaError/
-// InvalidCurrentPasswordError above). Rejected BEFORE any write — no
-// partial mutation, no doctor-profile information Alert.
-export class PhoneLastIdentifierError extends AppError {
+// PRE-R — replaces the old Z6-R1/Z6-R1-FIX1 PhoneLastIdentifierError.
+// PATCH /users/me/profile: the caller's PROSPECTIVE final state (after
+// applying this entire patch — never just the pre-update state in
+// isolation) would leave BOTH User.email and Medico.phone null. Those are
+// this account's only two login identifiers, so that final state would be
+// a self-inflicted lockout — zero ways to authenticate. 400 (a
+// business-rule validation failure, same status family as ValidationError),
+// its own distinct code so the frontend can route this to a shared
+// email/phone message rather than a generic banner (same reasoning as
+// DuplicateCedulaError/InvalidCurrentPasswordError above). Rejected BEFORE
+// any write — no partial mutation, no doctor-profile information Alert.
+// Deliberately NOT named for phone alone any more — the rule applies
+// symmetrically to both identifiers now that email is also editable here.
+export class LastLoginIdentifierError extends AppError {
   constructor() {
     super(
-      'No puedes eliminar tu teléfono: es tu único método de inicio de sesión. Agrega un correo electrónico primero.',
+      'Debes conservar al menos un correo electrónico o un número de teléfono para acceder a tu cuenta.',
       400,
-      'PHONE_REQUIRED_FOR_LOGIN',
+      'LAST_LOGIN_IDENTIFIER_REQUIRED',
     )
   }
 }

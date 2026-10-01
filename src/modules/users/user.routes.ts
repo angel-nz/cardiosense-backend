@@ -11,9 +11,9 @@ import { passwordChangeLimiter, avatarUploadLimiter } from '@/middlewares/rateLi
 import { prisma } from '@/config/prisma'
 import { env } from '@/config/env'
 import {
-  NotFoundError, DuplicateCedulaError, DuplicatePhoneError, InvalidCurrentPasswordError, PasswordUnchangedError,
+  NotFoundError, DuplicateCedulaError, DuplicatePhoneError, DuplicateEmailError, InvalidCurrentPasswordError, PasswordUnchangedError,
   FileTooLargeError, InvalidImageError, NoAvatarError, AvatarStorageUnavailableError,
-  PhoneLastIdentifierError,
+  LastLoginIdentifierError,
 } from '@/lib/errors'
 // Z6-R1 — RegisterDto is now a ZodEffects (wrapped in `.superRefine()` for
 // the email-or-phone invariant) and no longer exposes `.shape`; the
@@ -28,6 +28,11 @@ import { RegisterPasswordField } from '@/modules/auth/auth.dto'
 // "resend-unchanged-legacy-value" escape hatch is needed: this one field
 // fully owns the omitted/null/blank/valid/invalid contract on its own.
 import { NullableCanonicalPhoneField } from '@/lib/phone'
+// PRE-R — shared email-field infrastructure, same precedent/rationale as
+// NullableCanonicalPhoneField immediately above (generic, reusable domain
+// validator in lib/, not owned by any one feature). User.email becomes
+// editable through this route as of PRE-R — see UpdateMyProfileDto below.
+import { NullableCanonicalEmailField } from '@/lib/email'
 import { revokeSession, revokeOtherSessions, clearRefreshCookie } from '@/lib/session'
 import { disconnectSessionSockets, disconnectOtherSessionSockets } from '@/socket/socketServer'
 import { normalizeAvatarUpload } from '@/modules/users/avatar.pipeline'
@@ -363,10 +368,21 @@ router.get('/me/profile',
 )
 
 // PATCH /users/me/profile
-// Strict DTO: firstName/lastName/cedulaProfesional/especialidad/hospital
-// ONLY. email/role/id/isActive/userId/passwordHash and any other key are
-// rejected by `.strict()` before this handler ever runs — they are never
-// silently accepted or updated (mass-assignment protection).
+// Strict DTO: firstName/lastName/email/cedulaProfesional/especialidad/
+// hospital/phone ONLY. role/id/isActive/userId/passwordHash and any other
+// key are rejected by `.strict()` before this handler ever runs — they are
+// never silently accepted or updated (mass-assignment protection).
+// PRE-R — `email` is new here: previously read-only (Y3 §2/§36), it is now
+// editable/clearable for every role, not just MEDICO (User.email exists on
+// every account). It reuses NullableCanonicalEmailField (lib/email.ts),
+// which already implements the exact PATCH contract this needs: omitted →
+// unchanged; null/blank → clear; a non-blank value must be a normalized,
+// valid email. Applies uniformly regardless of role — a non-MEDICO (e.g.
+// ADMIN) has no Medico.phone at all, so for that account the final-state
+// invariant below reduces to "email must stay non-null", which is exactly
+// this codebase's pre-existing ADMIN contract (RegisterDto requires email
+// for non-MEDICO) — not a new restriction, just now enforced on this route
+// too since it can finally change that value.
 // Y3-FIX1 — the original Y3 draft added max(50)/max(200) bounds to these
 // three fields, reported in the Y3 final report as a transparent engineering
 // judgment call rather than a documented rule. Per ChatGPT review, invented
@@ -386,6 +402,10 @@ router.get('/me/profile',
 const UpdateMyProfileDto = z.object({
   firstName: z.string().trim().min(1, 'El nombre no puede estar vacío').max(100, 'El nombre es demasiado largo').optional(),
   lastName:  z.string().trim().min(1, 'El apellido no puede estar vacío').max(100, 'El apellido es demasiado largo').optional(),
+  // PRE-R — see this DTO's own top-of-block comment. Omitted/null/blank/
+  // valid-email semantics come entirely from NullableCanonicalEmailField
+  // itself; no additional normalize() needed here, same as `phone` below.
+  email: NullableCanonicalEmailField,
   // Nullable (not just optional): this is how the client asks to CLEAR a
   // professional field. `.trim()` here means an already-blank/whitespace
   // string is normalized before the handler ever sees it; the handler
@@ -409,7 +429,7 @@ router.patch('/me/profile',
   async (req, res: Response, next: NextFunction) => {
     try {
       const userId = (req as AuthRequest).user.sub
-      const { firstName, lastName, cedulaProfesional, especialidad, hospital, phone } = req.body
+      const { firstName, lastName, email, cedulaProfesional, especialidad, hospital, phone } = req.body
 
       // `!== undefined` (not truthy checks) so a field the client actually
       // sent — including an intentional blank/null to clear it — is
@@ -431,58 +451,62 @@ router.patch('/me/profile',
         ...(phone             !== undefined && { phone }),
       }
 
-      // Z6-R2 — this select used to also fetch the pre-update
-      // firstName/lastName/medico fields, so the now-removed
-      // doctor-profile information-alert trigger could compare "actually
-      // persisted before" vs "actually persisted after". That comparison
-      // had no other reader (the JSON response below reads the POST-update
-      // `user` snapshot, never `current`), so it is genuinely unused now —
-      // trimmed down to exactly what the lockout check just below still
-      // needs: `role` (is this even a MEDICO) and `email` (the CURRENT,
-      // authoritative value — never the request body, which this DTO
-      // doesn't even accept; email is not editable through this endpoint).
+      // PRE-R — this select now also fetches `medico.phone`: the final-
+      // state identity invariant below needs the CURRENT, authoritative
+      // phone value (for a PATCH that doesn't touch `phone` at all) exactly
+      // as it already needed the current `email` for the same reason.
+      // `role` is still "is this even a MEDICO" (a non-MEDICO has no
+      // `medico` relation, hence no phone, ever).
       const current = await prisma.user.findUnique({
         where: { id: userId },
-        select: { role: true, email: true },
+        select: { role: true, email: true, medico: { select: { phone: true } } },
       })
       if (!current) throw new NotFoundError('User')
 
-      // Z6-R1 §2/§17 — lockout protection. Medico.phone is now a login
-      // identifier (schema.prisma), so a doctor whose User.email is
-      // already null must never be allowed to clear their phone — that
-      // would leave the account with zero ways to authenticate.
-      // `phone !== undefined` means the client explicitly included the
-      // `phone` key in this PATCH (NullableCanonicalPhoneField already
-      // normalized omitted/blank/null into exactly `undefined` for
-      // "unchanged" or `null` for "clear" by this point — see its own
-      // comment in lib/phone.ts); `medicoData.phone === null` is "the
-      // requested phone becomes null" exactly as the brief specifies.
-      // Checked BEFORE the transaction below — rejected here means NO
-      // write happens at all (no partial mutation), the same
-      // "reject before any write" discipline the duplicate-cedula/Prisma
-      // P2002 path already follows in this same route. (Z6-R2 — the
-      // doctor-profile information Alert this comment used to also
-      // reference as a consequence of rejecting here no longer exists at
-      // all; this lockout rule is otherwise completely unchanged.)
-      if (
-        current.role === 'MEDICO' &&
-        phone !== undefined &&
-        medicoData.phone === null &&
-        current.email === null
-      ) {
-        throw new PhoneLastIdentifierError()
+      // PRE-R §G — final-state identity invariant, replacing the old Z6-R1/
+      // Z6-R1-FIX1 pre-state-only "last phone identifier" check. Now that
+      // BOTH email and phone are editable in the same PATCH, the rule must
+      // be evaluated against the PROSPECTIVE state after the ENTIRE patch
+      // is applied — never the pre-update state in isolation, and never
+      // either field checked alone.
+      //   prospectiveEmail = email field supplied ? normalized requested
+      //                        email : current email
+      //   prospectivePhone = (MEDICO only) phone field supplied ?
+      //                        normalized requested phone : current phone
+      //                        — always null for a non-MEDICO (no Medico
+      //                        row, so no fallback identifier ever exists
+      //                        for that role; this is the pre-existing
+      //                        ADMIN contract, see this DTO's own comment).
+      // `email`/`phone` here are already fully normalized by their Zod
+      // fields (NullableCanonicalEmailField/NullableCanonicalPhoneField) —
+      // `undefined` means "omitted from this PATCH" (leave unchanged),
+      // `null` means "explicitly cleared".
+      const prospectiveEmail: string | null =
+        email !== undefined ? (email as string | null) : current.email
+      const prospectivePhone: string | null =
+        current.role === 'MEDICO'
+          ? (phone !== undefined ? (phone as string | null) : (current.medico?.phone ?? null))
+          : null
+
+      // Rejected BEFORE any write — no partial mutation, no doctor-profile
+      // information Alert. Same "reject before any write" discipline the
+      // duplicate-cedula/phone/email P2002 path below already follows.
+      if (prospectiveEmail === null && prospectivePhone === null) {
+        throw new LastLoginIdentifierError()
       }
 
-      // Atomic: User.firstName/lastName and Medico's professional fields
-      // are one Profile save. A duplicate-cedula conflict must not leave
-      // firstName/lastName partially committed — the transaction ensures
-      // both writes succeed together or neither does.
+      // Atomic: User.firstName/lastName/email and Medico's professional
+      // fields are one Profile save. A duplicate-cedula/phone/email
+      // conflict must not leave firstName/lastName/email partially
+      // committed — the transaction ensures every write succeeds together
+      // or none does (PRE-R §I).
       const user = await prisma.$transaction(tx =>
         tx.user.update({
           where: { id: userId },
           data: {
             ...(firstName !== undefined && { firstName }),
             ...(lastName  !== undefined && { lastName }),
+            ...(email     !== undefined && { email }),
             ...(current.role === 'MEDICO' && Object.keys(medicoData).length > 0 && {
               medico: { update: medicoData },
             }),
@@ -519,23 +543,27 @@ router.patch('/me/profile',
         avatar: user.avatarImage ? { updatedAt: user.avatarImage.updatedAt } : null,
       })
     } catch (err) {
-      // Prisma unique-constraint violation. Medico now has TWO unique
-      // columns reachable from this same write — cedulaProfesional
-      // (pre-existing) and, as of Z6-R1, phone (medicos_phone_key, since
-      // phone doubles as a login identifier) — so `err.meta?.target` must
-      // be inspected to tell a genuine cedula conflict apart from a genuine
-      // phone conflict (same pre-check + P2002-race pattern already used
-      // by auth.service.ts::register() for this exact column pair; a
-      // pre-check alone would miss a race between two concurrent profile
-      // updates, so the DB constraint — never weakened — remains the
-      // authoritative source of truth here). The current doctor keeping
-      // their own unchanged cedula/phone never hits this path (no actual
-      // write occurs against a differing value), so this only fires for a
-      // genuine conflict with another Medico's row — and never identifies
-      // or otherwise leaks which other doctor already owns the conflicting
-      // value (Z6-R1-FIX1 §5).
+      // Prisma unique-constraint violation. This write can now reach THREE
+      // unique columns — User.email (PRE-R, newly editable here),
+      // Medico.cedulaProfesional (pre-existing), and Medico.phone (Z6-R1,
+      // since phone doubles as a login identifier) — so `err.meta?.target`
+      // must be inspected to tell them apart (same pre-check +
+      // P2002-race pattern already used by auth.service.ts::register() for
+      // this exact column set; a pre-check alone would miss a race between
+      // two concurrent profile updates, so the DB constraint — never
+      // weakened — remains the authoritative source of truth here). The
+      // current doctor keeping their own unchanged email/cedula/phone never
+      // hits this path (no actual write occurs against a differing value),
+      // so this only fires for a genuine conflict with another account's
+      // row — and never identifies or otherwise leaks which other
+      // account/doctor already owns the conflicting value (Z6-R1-FIX1 §5,
+      // extended to email by PRE-R §J).
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         const fields = (err.meta?.target as string[] | undefined) ?? []
+        if (fields.includes('email')) {
+          next(new DuplicateEmailError())
+          return
+        }
         if (fields.includes('phone')) {
           next(new DuplicatePhoneError())
           return
