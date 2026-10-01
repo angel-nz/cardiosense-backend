@@ -81,13 +81,18 @@ export class HealthRecordService {
     // HealthRecord itself, not about whatever the AI service later decides
     // (a HIGH/MODERATE/ANOMALY prediction Alert, if any, is a fully
     // separate Alert created independently by PredictionService).
+    // PRE-R2F — same duplication rule as patient.service.ts's information
+    // Alerts: `patientName` already renders as this Alert's own title line
+    // (Topbar/AlertsPage/AlertToast), so `message` no longer repeats the
+    // name — the clinical meaning (a new record was registered) is fully
+    // preserved without it.
     const alertSvc = new AlertService(this.io)
     await alertSvc.createInformationAlert({
       type:         'INFO_HEALTH_RECORD_CREATED',
       patientId:    record.patientId,
       medicoUserId: userId,
       patientName:  `${patient.firstName} ${patient.lastName}`,
-      message:      `Se registró un nuevo registro clínico para ${patient.firstName} ${patient.lastName}.`,
+      message:      'Se registró un nuevo registro clínico.',
     })
 
     // Q2 — automatic prediction. Deliberately NOT awaited: the HealthRecord

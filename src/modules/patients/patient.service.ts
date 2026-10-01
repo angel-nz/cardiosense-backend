@@ -107,13 +107,19 @@ export class PatientService {
     // that was never actually persisted). Service-layer only — no
     // controller-side duplicate (patient.controller.ts's create() just
     // awaits this method and returns its result).
+    // PRE-R2F — the patient's full name is already carried in
+    // `patientName` below, which Topbar/AlertsPage/AlertToast all render as
+    // this Alert's own bold "title" line (see alertService.ts's
+    // `patientName` flattening and each component's `alert.patientName ||
+    // 'Notificación general'` row) — the name must not ALSO appear inside
+    // `message`, or the doctor reads it twice for the same Alert.
     const alertSvc = new AlertService(this.io)
     await alertSvc.createInformationAlert({
       type:         'INFO_PATIENT_CREATED',
       patientId:    patient.id,
       medicoUserId: userId,
       patientName:  `${patient.firstName} ${patient.lastName}`,
-      message:      `Se creó el paciente ${patient.firstName} ${patient.lastName}.`,
+      message:      'Paciente creado correctamente.',
     })
 
     return patient
@@ -172,6 +178,9 @@ export class PatientService {
     // actually stored before against what is actually stored now — not
     // the raw dto, which V6.2's phone precedent already established can
     // legitimately resend an unchanged value.
+    // PRE-R2F — same duplication rule as create() above: `patientName`
+    // already renders as this Alert's own title line, so `message` no
+    // longer repeats the name.
     if (personalInfoChanged(current, patient)) {
       const alertSvc = new AlertService(this.io)
       await alertSvc.createInformationAlert({
@@ -179,7 +188,7 @@ export class PatientService {
         patientId:    patient.id,
         medicoUserId: userId,
         patientName:  `${patient.firstName} ${patient.lastName}`,
-        message:      `Se actualizó la información personal de ${patient.firstName} ${patient.lastName}.`,
+        message:      'Se actualizó la información personal del paciente.',
       })
     }
 
@@ -202,12 +211,60 @@ export class PatientService {
   // SHOWN-but-still-inactive patient is this same call; reactivating a
   // HIDDEN one requires SHOW (visibility endpoint) first, then this
   // endpoint, as two separate, deliberate actions (Z8 §9's required
-  // sequence). No persisted Z5 Alert — Z3 ActionNotification is the
-  // frontend's own feedback mechanism for this (Z8 §38).
+  // sequence).
+  //
+  // PRE-R2B §9/§10/§12/§13/§16/§18 — a successful isActive TRANSITION now
+  // also persists exactly one INFO_PATIENT_UPDATED information Alert (the
+  // existing AlertType, no new one added — §19). "Transition" is the
+  // operative word: `current` (the pre-update snapshot already fetched by
+  // getOne() above) is compared against the just-persisted row, so the
+  // documented no-op resend shape above (deactivating an already-inactive
+  // patient) never fires a second, misleading lifecycle Alert — mirrors
+  // exactly how update()'s personalInfoChanged() above already guards
+  // against a no-change PATCH (§12's "exactly ONE Alert" / "no duplicate
+  // because of a repeated call"). HIDE/SHOW (below) are never routed
+  // through this method or this Alert producer at all (§16/§17) — the
+  // generic personalInfoChanged() detector above also still excludes
+  // isActive/isHidden by construction, so this lifecycle Alert and the
+  // personal-info Alert can never both fire for the same request (§18).
+  //
+  // Consistency/transaction design (§13): deliberately NOT wrapped in a
+  // Prisma $transaction with repo.setActive() above. This reuses
+  // AlertService.createInformationAlert() exactly as create()/update()
+  // already do — and that method is Z5-FIX1's explicit, documented
+  // best-effort design: it never throws, so a failure inside it (DB error,
+  // emit error) is caught/logged there and can never retroactively fail
+  // this request or roll back the Paciente write that already committed
+  // via repo.setActive() above. That already satisfies §13's requirements
+  // without a new cross-service transaction: if repo.setActive() itself
+  // fails, it throws before any Alert is ever attempted (no lifecycle
+  // Alert, no false ActionNotification, no realtime notification — the
+  // whole request fails); if it succeeds, the status change is
+  // authoritative and persisted Alert documentation is best-effort on top
+  // of it, same trade-off Z5-FIX1 already established and justified for
+  // every other information-Alert trigger in this codebase — not a new
+  // architecture introduced by this block.
   async setStatus(userId: string, patientId: string, isActive: boolean) {
-    await this.getOne(userId, patientId)
+    const current = await this.getOne(userId, patientId)
     const patient = await repo.setActive(patientId, isActive)
     this.emitPatientUpdated(patient)
+
+    // PRE-R2F — same duplication rule: `patientName` already renders as
+    // this Alert's own title line, so neither branch of `message` repeats
+    // the name anymore.
+    if (current.isActive !== patient.isActive) {
+      const alertSvc = new AlertService(this.io)
+      await alertSvc.createInformationAlert({
+        type:         'INFO_PATIENT_UPDATED',
+        patientId:    patient.id,
+        medicoUserId: userId,
+        patientName:  `${patient.firstName} ${patient.lastName}`,
+        message:      patient.isActive
+          ? 'Se reactivó al paciente.'
+          : 'Se desactivó al paciente.',
+      })
+    }
+
     return patient
   }
 

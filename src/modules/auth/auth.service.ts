@@ -227,17 +227,22 @@ export class AuthService {
 
     // Y3.1B §19/§25 — this call previously had NO `include` at all (a plain
     // findUnique), yet still fed the same shared sanitizeUser() below —
-    // meaning `refresh()`'s response has always silently omitted `medico`
-    // too, not just avatar. Out of scope to change that pre-existing
-    // `medico` omission here (a different, unrelated gap this block did not
-    // introduce and was not asked to fix), but avatarImage IS added here
-    // since Y3.1B's own contract requires every one of these four paths to
-    // report avatar metadata consistently (Y3.1B §19).
+    // meaning `refresh()`'s response silently omitted `medico` too, not just
+    // avatar. That gap was left out of scope at the time (a different,
+    // unrelated concern that block was not asked to fix), but it is exactly
+    // the PRE-R2B-FIX2 auth-rehydration defect: login/register/me all
+    // `include: { medico: true, ... }`, so `especialidad`/`phone`/etc. are
+    // present immediately after login, then silently disappear the moment
+    // AuthContext's bootstrap effect redeems the refresh cookie through this
+    // method on the next page load — the ONE of these four user-data paths
+    // that dropped `medico`. Fixed here by including it the same way the
+    // other three already do, so all four paths share one identical User
+    // wire-shape (PRE-R2B-FIX2's Canonical Authenticated User Contract).
     let user
     try {
       user = await prisma.user.findUnique({
         where:   { id: userId },
-        include: { avatarImage: { select: { updatedAt: true } } },
+        include: { medico: true, avatarImage: { select: { updatedAt: true } } },
       })
     } catch (err) {
       // Y8D1 §13 — a thrown exception from the lookup itself (operational
@@ -354,7 +359,12 @@ export class AuthService {
   private sanitizeUser(user: {
     // Z6-R1 — nullable: a phone-only doctor has no email at all.
     id: string; email: string | null; firstName: string; lastName: string; role: string; isActive: boolean; createdAt: Date
-    medico?: { id: string; especialidad: string | null; hospital: string | null } | null
+    // PRE-R2B-FIX2 — widened to the full Medico shape (this already was what
+    // register()/login()/me() passed through at runtime via their own
+    // `include: { medico: true }`; only this declared parameter type under-
+    // stated it as especialidad/hospital-only). Now that refresh() includes
+    // `medico` too, this type accurately reflects every caller.
+    medico?: { id: string; cedulaProfesional: string | null; especialidad: string | null; hospital: string | null; phone: string | null } | null
     avatarImage?: { updatedAt: Date } | null
   }) {
     return {
