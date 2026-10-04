@@ -2,7 +2,7 @@ import { Router } from 'express'
 import type { Server as IOServer } from 'socket.io'
 import { authenticate, withAuth } from '@/middlewares/authenticate'
 import { validate } from '@/middlewares/validate'
-import { CreatePredictionDto, GlobalPredictionQueryDto, PatientPredictionQueryDto } from './prediction.dto'
+import { GlobalPredictionQueryDto, PatientPredictionQueryDto } from './prediction.dto'
 import { createPredictionController } from './prediction.controller'
 
 export function createPredictionRouter(io?: IOServer) {
@@ -12,8 +12,10 @@ export function createPredictionRouter(io?: IOServer) {
 
   router.use(auth)
 
-  // POST /predictions  → run prediction
-  router.post('/', validate(CreatePredictionDto), withAuth(ctrl.predict))
+  // NEW S2E-FIX4 — POST /predictions (doctor-triggered "manual" Prediction)
+  // REMOVED: Predictions are created ONLY automatically from a persisted REAL
+  // HealthRecord (HealthRecordService → PredictionService.predictFromHealthRecord).
+  // This router is READ-ONLY; an unrouted POST falls through to the app's 404.
 
   // GET  /predictions  → list all (paginated)
   // U6.2 — now validated via the established project pattern (was

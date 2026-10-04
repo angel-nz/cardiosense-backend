@@ -114,6 +114,27 @@ npm run dev
 | GET     | `/api/predictions/:id`                | Detalle              |
 | GET     | `/api/predictions/patient/:patientId` | Por paciente         |
 
+#### Contrato de respuesta de Prediction (NEW R — R4F)
+
+Serialización central: `src/modules/predictions/prediction.serializer.ts` (allowlist).
+
+| Campo                       | Significado                                                                 | Lista / historial | Detalle (POST, GET `/:id`) |
+| --------------------------- | --------------------------------------------------------------------------- | ----------------- | -------------------------- |
+| `riskScore`, `riskLevel`    | Riesgo FINAL (personalizado, o exactamente el global en cualquier `GLOBAL_*`) | sí                | sí                         |
+| `globalRiskScore`           | Riesgo GLOBAL de Skorp antes de la personalización                          | sí                | sí                         |
+| `modelVersion`              | Versión del modelo GLOBAL                                                   | sí                | sí                         |
+| `anomalyScore`, `isAnomaly` | Anomalía GLOBAL (no existe anomalía personalizada)                          | sí                | sí                         |
+| `personalizationStatus`     | `INDIVIDUALIZED` / `GLOBAL_INSUFFICIENT_HISTORY` / `GLOBAL_INCOMPATIBLE_HISTORY` / `GLOBAL_ERROR_FALLBACK`; `null` = predicción legacy | sí | sí |
+| `personalizationVersion`    | p. ej. `R-BPBC-1`; `null` = legacy                                          | sí                | sí                         |
+| `personalizationProvenance` | Metadatos de auditoría (conteos, corte causal, huella, γ, ganancias, razón de fallback). No es una medida de exactitud ni de confianza clínica. | NO | sí |
+| `featureImportance`         | Importancia del modelo GLOBAL (solo en la respuesta de POST, no persistida) | —                 | solo POST                  |
+| `sexUsed`                   | Interno (comparabilidad de π). Nunca se expone.                             | NO                | NO                         |
+
+- `INDIVIDUALIZED` significa que el mecanismo congelado condicionado por la historia se aplicó; no implica mayor exactitud, validación clínica ni entrenamiento con el paciente. Con γ = 0 puede ser `INDIVIDUALIZED` con `riskScore == globalRiskScore`; el estado nunca se infiere de la diferencia de scores.
+- Predicciones legacy: `globalRiskScore = riskScore`, `personalizationStatus/Version/Provenance = null` (solo serialización; la fila no se modifica).
+- Las predicciones embebidas en `GET /api/patients/:id/history` usan el contrato de lista.
+- Alertas de riesgo: usan el riesgo FINAL (HIGH → CRITICAL; si no, anomalía GLOBAL → WARNING; si no, MODERATE → WARNING; máximo una por predicción). Los eventos Socket.IO se emiten solo después del commit; `prediction_completed` lleva `riskScore`/`riskLevel` FINALES y no incluye `sexUsed` ni la provenance.
+
 ### Alertas
 
 | Método | Ruta                     | Descripción                       |
@@ -138,7 +159,7 @@ npm run dev
 | Evento                   | Room                | Payload                                                                     |
 | ------------------------ | ------------------- | --------------------------------------------------------------------------- |
 | `new_alert`            | `user:{medicoId}` | `{ id, patientId, patientName, severity, message, riskScore, createdAt }` |
-| `prediction_completed` | `patient:{id}`    | `{ predictionId, patientId, riskScore, riskLevel, isAnomaly }`            |
+| `prediction_completed` | `patient:{id}`    | `{ predictionId, patientId, healthRecordId, riskScore, riskLevel, isAnomaly }` (riesgo FINAL) |
 
 ### Cliente → Servidor
 

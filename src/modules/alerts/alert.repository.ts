@@ -44,8 +44,11 @@ export class AlertRepository {
     type?:         AlertType
     severity:      AlertSeverity
     message:       string
-  }) {
-    return prisma.alert.create({ data })
+  }, client: Pick<Prisma.TransactionClient, 'alert'> = prisma) {
+    // NEW R (R4E) — `client` lets PredictionService persist a prediction
+    // Alert inside the SAME Prisma transaction as its Prediction. Every
+    // other caller keeps the default (the shared client), unchanged.
+    return client.alert.create({ data })
   }
 
   // U7.2 — search is ONE of three OR branches (name tokens, CURP, alert

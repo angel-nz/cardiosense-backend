@@ -4,12 +4,24 @@ import { logger } from '@/lib/logger'
 import { AlertRepository } from './alert.repository'
 import { isRealtimeNotificationEnabled } from './realtimeNotification'
 import { paginate } from '@/types'
-import type { AlertSeverity, AlertType } from '@prisma/client'
+import type { AlertSeverity, AlertType, Prisma } from '@prisma/client'
 import type { AlertQueryDtoType } from './alert.dto'
 import type { RealtimeAlertCategory } from './realtimeNotification'
 import type { Server as IOServer } from 'socket.io'
 
 const repo = new AlertRepository()
+
+// The prediction-generated Alert (HIGH / MODERATE / ANOMALY) — see create().
+export interface PredictionAlertData {
+  patientId:        string
+  predictionId:     string
+  severity:         string
+  message:          string
+  medicoUserId:     string
+  patientName:      string
+  riskScore:        number
+  realtimeCategory: RealtimeAlertCategory
+}
 
 export class AlertService {
   constructor(private readonly io?: IOServer) {}
@@ -19,26 +31,36 @@ export class AlertService {
   // event below is delivered. The caller (prediction.service.ts) already
   // knows exactly why it's creating this Alert — this method never infers
   // the category from severity/message (Y4 §31).
-  async create(data: {
-    patientId:        string
-    predictionId:     string
-    severity:         string
-    message:          string
-    medicoUserId:     string
-    patientName:      string
-    riskScore:        number
-    realtimeCategory: RealtimeAlertCategory
-  }) {
-    // Clinical persistence happens unconditionally, before any preference is
-    // ever consulted (Y4 §22/§32) — nothing below this line can prevent or
-    // roll back Alert creation.
-    const alert = await repo.create({
+  //
+  // NEW R (R4E) — split into persist (inside the caller's transaction) and
+  // notify (after commit). PredictionService uses the two halves directly so
+  // a prediction Alert is committed atomically with its Prediction and no
+  // realtime event can fire before that commit. create() keeps the original
+  // persist-then-notify composition for any non-transactional caller.
+  async create(data: PredictionAlertData) {
+    const alert = await this.persistPredictionAlert(data)
+    await this.notifyPredictionAlertCreated(alert, data)
+    return alert
+  }
+
+  // Clinical persistence only — no realtime emission, no preference lookup.
+  // `client` = the Prisma transaction client when called by PredictionService.
+  persistPredictionAlert(
+    data: Pick<PredictionAlertData, 'patientId' | 'predictionId' | 'severity' | 'message'>,
+    client?: Pick<Prisma.TransactionClient, 'alert'>,
+  ) {
+    return repo.create({
       patientId:    data.patientId,
       predictionId: data.predictionId,
       severity:     data.severity as AlertSeverity,
       message:      data.message,
-    })
+    }, client)
+  }
 
+  // Realtime notification for an ALREADY-COMMITTED prediction Alert. Exactly
+  // the pre-R4E emission sequence and payloads (alerts_changed → preference-
+  // gated new_alert → dashboard_activity_changed), unchanged.
+  async notifyPredictionAlertCreated(alert: { id: string; createdAt: Date }, data: PredictionAlertData) {
     // Y4-FIX2 — alerts_changed: an ungated, canonical-data-invalidation
     // signal, deliberately separate from `new_alert` (the notification-
     // preference-gated, presentation-only event below). Turning a realtime
@@ -114,14 +136,13 @@ export class AlertService {
     // Dashboard Calendar, unread state on refetch, etc.) never desyncs from
     // what's actually in the database. Redundant with the
     // dashboard_activity_changed prediction.service.ts already emits for
-    // this same predict() call — unchanged, pre-existing, accepted-by-design
+    // this same predictFromHealthRecord() call — unchanged, pre-existing, accepted-by-design
     // duplication (O4.1), not something Y4 introduces or removes.
     this.io?.to(`user:${data.medicoUserId}`).emit('dashboard_activity_changed', {
       patientId: data.patientId,
       eventDate: alert.createdAt,
     })
 
-    return alert
   }
 
   // Z5 — Configurable Information Alerts. The ONE entry point every one of

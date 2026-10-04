@@ -11,7 +11,9 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "ts-node prisma/seed.ts",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "forecast:bootstrap": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/forecast-bootstrap.ts",
+    "prediction:reconcile": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/prediction-reconcile.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.16.0",

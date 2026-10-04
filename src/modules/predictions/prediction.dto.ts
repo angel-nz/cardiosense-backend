@@ -1,10 +1,8 @@
 import { z } from 'zod'
 import { boundaryField } from '@/lib/timezone'
 
-export const CreatePredictionDto = z.object({
-  patientId:     z.string().uuid('Invalid patient id'),
-  healthRecordId: z.string().uuid().optional(),
-})
+// NEW S2E-FIX4 — CreatePredictionDto removed together with POST /predictions
+// (no public request body can create a Prediction any more).
 
 export const PredictionQueryDto = z.object({
   page:  z.coerce.number().int().min(1).default(1),
@@ -29,6 +27,10 @@ export const PatientPredictionQueryDto = z.object({
   limit:     z.coerce.number().int().min(1).max(100).default(20),
   targetId:  z.string().uuid('Invalid target id').optional(),
   riskLevel: z.enum(['LOW', 'MODERATE', 'HIGH']).optional(),
+  // NEW S3 — 'clinicalTime' = canonical clinical order (every frontend
+  // history). 'predictedAt' (default) keeps the compatible calculation-time
+  // order for any non-frontend/technical consumer.
+  sortBy:    z.enum(['predictedAt', 'clinicalTime']).default('predictedAt'),
   from:      boundaryField('from'),
   to:        boundaryField('to'),
 }).refine(
@@ -47,6 +49,7 @@ export const GlobalPredictionQueryDto = z.object({
   limit:     z.coerce.number().int().min(1).max(100).default(20),
   search:    z.string().trim().min(1).optional(),
   riskLevel: z.enum(['LOW', 'MODERATE', 'HIGH']).optional(),
+  sortBy:    z.enum(['predictedAt', 'clinicalTime']).default('predictedAt'),   // NEW S3 — see PatientPredictionQueryDto
   from:      boundaryField('from'),
   to:        boundaryField('to'),
 }).refine(
@@ -54,6 +57,5 @@ export const GlobalPredictionQueryDto = z.object({
   { message: '"from" must not be after "to"', path: ['from'] },
 )
 
-export type CreatePredictionDtoType = z.infer<typeof CreatePredictionDto>
 export type GlobalPredictionQueryDtoType = z.infer<typeof GlobalPredictionQueryDto>
 export type PatientPredictionQueryDtoType = z.infer<typeof PatientPredictionQueryDto>

@@ -7,12 +7,8 @@ import type { GlobalPredictionQueryDtoType, PatientPredictionQueryDtoType } from
 export function createPredictionController(io?: IOServer) {
   const svc = new PredictionService(io)
 
-  const predict = async (req: AuthRequest, res: Response, next: NextFunction) => {
-    try {
-      const result = await svc.predict(req.user.sub, req.body)
-      res.status(201).json(result)
-    } catch (err) { next(err) }
-  }
+  // NEW S2E-FIX4 — no `predict` handler: the public manual Prediction API was
+  // removed. This controller only serves READ endpoints.
 
   const listByPatient = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
@@ -37,5 +33,5 @@ export function createPredictionController(io?: IOServer) {
     } catch (err) { next(err) }
   }
 
-  return { predict, listByPatient, listAll, getOne }
+  return { listByPatient, listAll, getOne }
 }

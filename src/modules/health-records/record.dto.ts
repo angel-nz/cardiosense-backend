@@ -27,3 +27,39 @@ export const RecordQueryDto = z.object({
 })
 
 export type CreateRecordDtoType = z.infer<typeof CreateRecordDto>
+
+// NEW S2A — HTTP request contract for POST /health-records.
+// `CreateRecordDto` above is deliberately left byte-for-byte unchanged: it is
+// also the CLINICAL model-input contract that the frozen R evidence builder
+// (evidence.builder.ts::isValidModelInput) parses, and REAL clinical time is
+// not a model input. The request DTO extends it with:
+//   measuredAt — REQUIRED (A4) REAL clinical instant: ONE UTC ISO-8601 string
+//     with exactly 3 fractional digits and the literal `Z`
+//     (e.g. "2026-10-02T18:30:00.000Z"). Offsets, missing zone, other
+//     precisions and non-calendar instants are rejected (400). Converting the
+//     clinician's Guadalajara wall time to this instant is the client's job
+//     (S2E); the backend never guesses a timezone.
+//   clinicalTimeSource — server-assigned only (record.service.ts sets
+//     CLINICIAN_ENTERED). Any client-supplied value is rejected (400), never
+//     silently stored.
+// Bounds that need the patient and the request's `now` (≤ now + 5 min,
+// clinical day ≥ birthDate) are enforced in record.service.ts.
+export const MEASURED_AT_FORMAT_MESSAGE = 'measuredAt must be a UTC instant like 2026-10-02T18:30:00.000Z'
+
+export const MeasuredAtField = z
+  .string({ required_error: 'measuredAt is required' })
+  .datetime({ precision: 3, offset: false, message: MEASURED_AT_FORMAT_MESSAGE })
+  .refine(v => {
+    const d = new Date(v)
+    return !isNaN(d.getTime()) && d.toISOString() === v
+  }, { message: 'measuredAt is not a valid calendar instant' })
+  .transform(v => new Date(v))
+
+export const CreateHealthRecordRequestDto = CreateRecordDto.extend({
+  measuredAt:         MeasuredAtField,
+  clinicalTimeSource: z.undefined({
+    invalid_type_error: 'clinicalTimeSource is assigned by the server and must not be sent',
+  }).optional(),
+})
+
+export type CreateHealthRecordRequestDtoType = z.infer<typeof CreateHealthRecordRequestDto>

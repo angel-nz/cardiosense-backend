@@ -4,6 +4,7 @@ import { createApp } from '@/app'
 import { setupSocket } from '@/socket/socketServer'
 import { prisma } from '@/config/prisma'
 import { logger } from '@/lib/logger'
+import { automaticPredictionWorker, isAutomaticPredictionWorkerDisabled } from '@/modules/predictions/automatic/automaticPrediction.worker'
 
 // Q2-FIX: process-level safety net. Without this, ANY unhandled promise
 // rejection anywhere in the app — not just in the automatic-prediction
@@ -43,6 +44,11 @@ async function bootstrap() {
   const app = createApp(io)
   httpServer.on('request', app)
 
+  // NEW S4 — durable automatic-Prediction worker: immediate startup recovery
+  // of due PENDING / RETRY_WAIT / lease-expired PROCESSING tasks, then
+  // periodic polling. Independent of any frontend connection.
+  if (!isAutomaticPredictionWorkerDisabled()) automaticPredictionWorker.start(io)
+
   // Start listening
   const port = parseInt(env.PORT, 10)
   httpServer.listen(port, () => {
@@ -54,6 +60,7 @@ async function bootstrap() {
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down...`)
+    await automaticPredictionWorker.stop()     // NEW S4 — no new ticks; await the pass in flight
     await prisma.$disconnect()
     httpServer.close(() => {
       logger.info('Server closed')

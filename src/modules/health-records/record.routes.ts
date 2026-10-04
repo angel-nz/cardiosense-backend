@@ -2,7 +2,7 @@ import { Router } from 'express'
 import type { Server as IOServer } from 'socket.io'
 import { authenticate, withAuth } from '@/middlewares/authenticate'
 import { validate } from '@/middlewares/validate'
-import { CreateRecordDto } from './record.dto'
+import { CreateHealthRecordRequestDto } from './record.dto'
 import { createRecordController } from './record.controller'
 
 export function createRecordRouter(io?: IOServer) {
@@ -13,7 +13,7 @@ export function createRecordRouter(io?: IOServer) {
   router.use(auth)
 
   // POST /health-records
-  router.post('/', validate(CreateRecordDto), withAuth(ctrl.create))
+  router.post('/', validate(CreateHealthRecordRequestDto), withAuth(ctrl.create))
 
   // GET /health-records/:id
   router.get('/:id', withAuth(ctrl.getOne))

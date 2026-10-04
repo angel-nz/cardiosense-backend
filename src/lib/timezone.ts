@@ -73,6 +73,31 @@ export function toLocalISODate(instant: Date, timeZone: string = BUSINESS_TIMEZO
   return `${wc.year}-${pad(wc.month)}-${pad(wc.day)}`
 }
 
+// ── NEW S2A — REAL clinical-time calendar helpers (S1-FIX1 §4) ────────────
+// The clinical calendar is ALWAYS the business timezone's (Guadalajara),
+// derived from the UTC instant through the IANA database (Intl) — never the
+// machine, browser or PostgreSQL session timezone.
+
+// Guadalajara clinical calendar day (YYYY-MM-DD) of a UTC instant.
+export function clinicalDayOf(instant: Date): string {
+  return toLocalISODate(instant, BUSINESS_TIMEZONE)
+}
+
+// A pure calendar date (YYYY-MM-DD) as the UTC-midnight Date — the same
+// representation Prisma uses for @db.Date values (e.g. Paciente.birthDate),
+// so calendar arithmetic on it must read UTC components only.
+export function isoDateToUTCDate(isoDate: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) throw new RangeError(`not a calendar date: ${isoDate}`)
+  const d = new Date(`${isoDate}T00:00:00.000Z`)
+  if (isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== isoDate) throw new RangeError(`invalid calendar date: ${isoDate}`)
+  return d
+}
+
+// A @db.Date value (UTC midnight) back to its calendar date (YYYY-MM-DD).
+export function utcDateToISODate(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
 // U6.2 — extracted from patient.timeline.dto.ts (P2), the only prior
 // implementation (dashboard.routes.ts already reuses TimelineQueryDto
 // verbatim rather than duplicating this logic, so no other consumer needed

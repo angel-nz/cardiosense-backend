@@ -197,7 +197,11 @@ export type BulkVisibilityDtoType    = z.infer<typeof BulkVisibilityDto>
 export const HistoryQueryDto = z.object({
   page:      z.coerce.number().int().min(1).default(1),
   limit:     z.coerce.number().int().min(1).max(50).default(10),
-  sortBy:    z.enum(['recordedAt', 'sysBP', 'diaBP', 'totChol', 'glucose', 'bmi']).default('recordedAt'),
+  // NEW S2E-FIX2 — 'clinicalTime' (default) = effective clinical time:
+  // measuredAt for CLINICIAN_ENTERED rows, recordedAt for legacy rows
+  // (see patient.repository.ts::getHistory). 'recordedAt' (pure entry
+  // time) stays accepted for backward compatibility.
+  sortBy:    z.enum(['clinicalTime', 'recordedAt', 'sysBP', 'diaBP', 'totChol', 'glucose', 'bmi']).default('clinicalTime'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
   from:      z.string().optional(),
   to:        z.string().optional(),

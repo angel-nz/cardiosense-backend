@@ -75,9 +75,15 @@ async function main() {
   })
 
   // Health record for p1
+  // NEW S2A — every NEW HealthRecord carries an explicit REAL clinical time
+  // (clinicalTimeSource has no DB default). Demo seed: measured "now".
+  const seedMeasuredAt = new Date()
   const record = await prisma.healthRecord.create({
     data: {
       patientId: p1.id,
+      recordedAt: seedMeasuredAt,
+      measuredAt: seedMeasuredAt,
+      clinicalTimeSource: 'CLINICIAN_ENTERED',
       age: 56,
       currentSmoker: true,
       cigsPerDay: 10,
@@ -101,6 +107,8 @@ async function main() {
       healthRecordId: record.id,
       riskScore: 0.7234,
       riskLevel: 'HIGH',
+      // NEW S2E-FIX3 — synthetic demo row, not produced by either real path.
+      origin: 'LEGACY_UNKNOWN',
       anomalyScore: -0.0812,
       isAnomaly: false,
       modelVersion: '1.2.0',

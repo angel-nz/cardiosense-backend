@@ -83,12 +83,40 @@ export class DuplicateEmailError extends AppError {
 // An INACTIVE_VISIBLE patient (isActive=false, isHidden=false) is a real,
 // fully resolvable, owned patient — never a 404 — but may not receive new
 // clinical activity. Thrown by HealthRecordService.create() and
-// PredictionService.predict() for exactly this state, BEFORE any
+// PredictionService.predictFromHealthRecord() for exactly this state, BEFORE any
 // HealthRecord insert / any callAIPredict call. A HIDDEN patient never
 // reaches this error — the same ownership lookups that would reach this
 // check already exclude isHidden=true rows entirely, so a hidden patient's
 // new-record/new-prediction attempt surfaces as the normal NotFoundError
 // instead (no "this patient exists but is hidden" leak — see Z8 §26).
+// NEW S2A — REAL clinical-time bounds for a NEW HealthRecord (S1-FIX1 §4.8),
+// checked in record.service.ts against the request's single captured `now`
+// and the patient's birthDate, BEFORE any write. Format errors are rejected
+// earlier by the request DTO (VALIDATION_ERROR).
+export class InvalidMeasuredAtError extends AppError {
+  constructor(code: 'MEASURED_AT_IN_FUTURE' | 'MEASURED_AT_BEFORE_BIRTH') {
+    super(
+      code === 'MEASURED_AT_IN_FUTURE'
+        ? 'La fecha y hora clínica no puede estar en el futuro.'
+        : 'La fecha clínica no puede ser anterior a la fecha de nacimiento del paciente.',
+      400,
+      code,
+    )
+  }
+}
+
+// NEW S2C-FIX1 — Angel's native runtime proved that an interactive
+// prisma.$transaction() can RESOLVE although PostgreSQL rolled the
+// transaction back at COMMIT. A resolved transaction is therefore not commit
+// evidence: the committed state is re-read by exact id before any success
+// effect, and this error is thrown when it is not visible / not consistent.
+// 500 — a server-side persistence failure, never a client error.
+export class TransactionCommitVerificationError extends AppError {
+  constructor(public readonly invariant: string) {
+    super('La operación no pudo confirmarse en la base de datos.', 500, 'TRANSACTION_COMMIT_NOT_VISIBLE')
+  }
+}
+
 export class PatientInactiveError extends AppError {
   constructor() {
     super(

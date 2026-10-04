@@ -2,10 +2,9 @@ import { prisma } from '@/config/prisma'
 import { ForbiddenError } from '@/lib/errors'
 import { startOfLocalDay, startOfLocalWeek, addDays, toLocalISODate } from '@/lib/timezone'
 import { DashboardRepository } from './dashboard.repository'
-import {
-  toClinicalRecordEvent, toPredictionEvent, deriveRiskChanges,
-} from '@/modules/patients/patient.timeline'
-import { sortDashboardCalendarEvents, type DashboardCalendarEvent } from './dashboard.calendar'
+import type { DashboardCalendarEvent } from './dashboard.calendar'
+import { buildClinicalCalendarEvents } from '@/modules/patients/clinicalCalendar'
+import { currentPredictionsOfLatestClinicalRecord, predictionClinicalInstantsInRange } from '@/modules/patients/clinicalLatest'
 
 const repo = new DashboardRepository()
 
@@ -29,15 +28,22 @@ export class DashboardService {
     const weekStart = startOfLocalWeek(now)
     const weekEnd = addDays(weekStart, 7)
 
-    const [predictionsToday, weekPredictions, patientsWithRisk] = await Promise.all([
-      repo.countPredictionsInRange(medico.id, todayStart, todayEnd),
-      repo.findPredictedAtInRange(medico.id, weekStart, weekEnd),
-      repo.findPatientsWithLatestRisk(medico.id),
+    // NEW S3 — clinical-time-first: a Prediction belongs to the Guadalajara
+    // day of its SOURCE record's effective clinical time (a back-dated record
+    // entered today is not "today"), and a patient's current risk is the
+    // Prediction of the EXACT clinically latest record (clinicalLatest.ts,
+    // S3-FIX1 strict: none on that record ⇒ the patient is in no risk bucket).
+    const visible = await prisma.paciente.findMany({ where: { medicoId: medico.id, isHidden: false }, select: { id: true } })
+    const [todayInstants, weekInstants, latestByPatient] = await Promise.all([
+      predictionClinicalInstantsInRange(medico.id, todayStart, todayEnd),
+      predictionClinicalInstantsInRange(medico.id, weekStart, weekEnd),
+      currentPredictionsOfLatestClinicalRecord(visible.map(p => p.id)),
     ])
+    const patientsWithRisk = visible.map(p => ({ predictions: latestByPatient.has(p.id) ? [{ riskLevel: latestByPatient.get(p.id)!.riskLevel as string }] : [] }))
 
     return {
-      predictionsToday,
-      predictionsThisWeek: this.bucketByLocalDay(weekStart, weekPredictions),
+      predictionsToday: todayInstants.length,
+      predictionsThisWeek: this.bucketByLocalDay(weekStart, weekInstants.map(predictedAt => ({ predictedAt }))),
       ...this.summarizeRisk(patientsWithRisk),
     }
   }
@@ -94,60 +100,16 @@ export class DashboardService {
     // Z2 — Alert-model events removed from the Dashboard calendar (was a
     // 4th parallel query, repo.findAlertsInRange; RISK_CHANGE is unaffected
     // — it is derived from Predictions, not read from the Alert table).
-    const [patients, records, predictionsInRange] = await Promise.all([
+    // NEW S2E-FIX3 — same clinical-time builder as the Patient timeline
+    // (clinicalCalendar.ts), scoped to this médico's visible patients: records
+    // at their effective clinical time, AUTOMATIC predictions at their source
+    // record's clinical time, LEGACY_UNKNOWN only inside record detail.
+    // The builder's order (clinical time → recordedAt → record → type) is kept.
+    const [patients, events] = await Promise.all([
       repo.findPatientIdentities(medico.id),
-      repo.findRecordsInRange(medico.id, from, to),
-      repo.findPredictionsInRange(medico.id, from, to),
+      buildClinicalCalendarEvents({ patient: { medicoId: medico.id, isHidden: false } }, from, to),
     ])
-
     const patientNameById = new Map(patients.map(p => [p.id, `${p.firstName} ${p.lastName}`]))
-
-    // O1-FIX/section 15,17: only patients with >=1 Prediction in range need
-    // a predecessor at all — and only if `from` was actually given (no
-    // lower bound means there's no "boundary" to preserve a transition
-    // across). A 5th DB round trip is skipped entirely when there's
-    // nothing relevant to look up, rather than firing an empty/useless
-    // query.
-    const relevantPatientIds = from ? [...new Set(predictionsInRange.map(p => p.patientId))] : []
-    const predecessors = relevantPatientIds.length > 0
-      ? await repo.findPredecessors(medico.id, relevantPatientIds, from as Date)
-      : []
-
-    // Section 14 — the one rule that matters most here: NEVER derive
-    // RISK_CHANGE across a mixed, multi-patient sequence. Group each
-    // patient's own predecessor (if any) + in-range Predictions
-    // separately, run P2's unmodified deriveRiskChanges() once per group,
-    // then combine. A Prediction from patient A is never compared against
-    // one from patient B.
-    const byPatient = new Map<string, { predecessor?: typeof predecessors[number]; inRange: typeof predictionsInRange }>()
-    for (const pred of predecessors) {
-      const group = byPatient.get(pred.patientId) ?? { inRange: [] }
-      group.predecessor = pred
-      byPatient.set(pred.patientId, group)
-    }
-    for (const p of predictionsInRange) {
-      const group = byPatient.get(p.patientId) ?? { inRange: [] }
-      group.inRange.push(p)
-      byPatient.set(p.patientId, group)
-    }
-
-    const riskChangeEvents = Array.from(byPatient.values()).flatMap(group => {
-      const sequence = group.predecessor ? [group.predecessor, ...group.inRange] : group.inRange
-      return deriveRiskChanges(sequence)
-    })
-
-    const clinicalEvents = records.map(toClinicalRecordEvent)
-    const predictionEvents = predictionsInRange.map(toPredictionEvent)
-
-    // Section 34 — decorate AFTER reusing P2's mappers as-is; patientName
-    // never touches patient.timeline.ts's own types/functions.
-    const decorated: DashboardCalendarEvent[] = [
-      ...clinicalEvents, ...predictionEvents, ...riskChangeEvents,
-    ].map(event => ({
-      ...event,
-      patientName: patientNameById.get(event.patientId) ?? 'Paciente',
-    }))
-
-    return sortDashboardCalendarEvents(decorated)
+    return events.map(event => ({ ...event, patientName: patientNameById.get(event.patientId) ?? 'Paciente' }))
   }
 }

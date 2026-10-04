@@ -1,17 +1,30 @@
 import { prisma } from '@/config/prisma'
-import type { RiskLevel, Prisma } from '@prisma/client'
+import type { RiskLevel, Prisma, PersonalizationStatus, PredictionOrigin } from '@prisma/client'
+import { orderedClinicalPredictionIds } from '@/modules/patients/clinicalLatest'
 
 export class PredictionRepository {
+  // NEW R (R4E) — every Prediction created from here on is a NEW-R row: the
+  // five R4A fields are REQUIRED at the type level (never left NULL), so a
+  // new row can never look legacy, and the R4A CHECK
+  // (personalization_status IS NULL) = (global_risk_score IS NULL) holds by
+  // construction. `client` = the transaction client (Prediction + Alert are
+  // persisted atomically by PredictionService).
   async create(data: {
-    patientId:     string
-    healthRecordId?: string
-    riskScore:     number
-    riskLevel:     RiskLevel
-    anomalyScore:  number
-    isAnomaly:     boolean
-    modelVersion:  string
-  }) {
-    return prisma.prediction.create({ data })
+    patientId:      string
+    healthRecordId: string
+    riskScore:      number            // FINAL score (individualized or exactly global)
+    riskLevel:      RiskLevel         // FINAL level
+    anomalyScore:   number            // GLOBAL
+    isAnomaly:      boolean           // GLOBAL
+    modelVersion:   string            // GLOBAL model version
+    globalRiskScore:           number
+    personalizationStatus:     PersonalizationStatus
+    personalizationVersion:    string
+    sexUsed:                   number
+    personalizationProvenance: Prisma.InputJsonObject
+    origin:                    PredictionOrigin   // NEW S2E-FIX3 — explicit, server-chosen
+  }, client: Pick<Prisma.TransactionClient, 'prediction'> = prisma) {
+    return client.prediction.create({ data })
   }
 
   // U8.2B — added deterministic `id desc` secondary tie-break (previously
@@ -100,6 +113,25 @@ export class PredictionRepository {
     return prisma.prediction.findUnique({ where: { id } })
   }
 
+  // NEW R (R4B) — persisted prediction history for the γ channel. Scoped IN
+  // THE QUERY to the authorized patient, to the given (already causally cut,
+  // patient-owned) HealthRecord ids, and to predictedAt strictly before the
+  // anchor's recordedAt — so a Prediction being created for the anchor (or any
+  // later re-prediction) can never enter its own history. Returns only what
+  // canonical GLOBAL-score selection needs; selection itself (legacy riskScore
+  // vs NEW-R globalRiskScore, version, dedupe) is done by the pure builder.
+  async findGlobalPredictionsForRecords(patientId: string, recordIds: string[], cutoff: Date) {
+    if (recordIds.length === 0) return []
+    return prisma.prediction.findMany({
+      where:   { patientId, healthRecordId: { in: recordIds }, predictedAt: { lt: cutoff } },
+      orderBy: [{ predictedAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true, patientId: true, healthRecordId: true, riskScore: true, globalRiskScore: true,
+        personalizationStatus: true, modelVersion: true, sexUsed: true, predictedAt: true,
+      },
+    })
+  }
+
   async findLatestByPatient(patientId: string) {
     return prisma.prediction.findFirst({
       where:   { patientId },
@@ -117,6 +149,62 @@ export class PredictionRepository {
   // included in the selected patient fields (needed by the redesigned
   // page); still scoped strictly inside `medicoId` — a foreign patient can
   // never match, search or otherwise.
+  // NEW S3 — doctor-facing CLINICAL order (sortBy=clinicalTime) for the
+  // patient Prediction history: source record effective clinical time DESC →
+  // recordedAt DESC → record id DESC → predictedAt DESC → id DESC. from/to
+  // bound the EFFECTIVE clinical time. The complete ordered id list is
+  // computed in SQL (clinicalLatest.ts) BEFORE paging; targetId resolves its
+  // page from that SAME order. R / S read methods above are untouched.
+  async findByPatientClinical(patientId: string, opts: {
+    page: number; limit: number; targetId?: string; from?: Date; to?: Date; riskLevel?: RiskLevel
+  }) {
+    const ordered = await orderedClinicalPredictionIds({ patientIds: [patientId], riskLevel: opts.riskLevel, from: opts.from, to: opts.to })
+    let resolvedPage = opts.page
+    let targetResolved: boolean | undefined
+    if (opts.targetId) {
+      const pos = ordered.indexOf(opts.targetId)
+      targetResolved = pos >= 0
+      if (pos >= 0) resolvedPage = Math.floor(pos / opts.limit) + 1
+    }
+    const pageIds = ordered.slice((resolvedPage - 1) * opts.limit, resolvedPage * opts.limit)
+    const rows = pageIds.length ? await prisma.prediction.findMany({ where: { id: { in: pageIds } }, include: { healthRecord: true } }) : []
+    const byId = new Map(rows.map(r => [r.id, r]))
+    const data = pageIds.map(id => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined)
+    return { data, total: ordered.length, page: resolvedPage, targetResolved }
+  }
+
+  // NEW S3 — global history in CLINICAL order (same contract as above).
+  async listAllClinical(medicoId: string, opts: {
+    page: number; limit: number; search?: string; from?: Date; to?: Date; riskLevel?: RiskLevel
+  }) {
+    const patientIds = (await prisma.paciente.findMany({ where: this.globalPatientWhere(medicoId, opts.search), select: { id: true } })).map(p => p.id)
+    const ordered = await orderedClinicalPredictionIds({ patientIds, riskLevel: opts.riskLevel, from: opts.from, to: opts.to })
+    const pageIds = ordered.slice((opts.page - 1) * opts.limit, opts.page * opts.limit)
+    const rows = pageIds.length ? await prisma.prediction.findMany({
+      where: { id: { in: pageIds } },
+      include: { patient: { select: { firstName: true, lastName: true, curp: true } }, healthRecord: true },
+    }) : []
+    const byId = new Map(rows.map(r => [r.id, r]))
+    return { data: pageIds.map(id => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined), total: ordered.length }
+  }
+
+  private globalPatientWhere(medicoId: string, search?: string): Prisma.PacienteWhereInput {
+    const patientWhere: Prisma.PacienteWhereInput = { medicoId, isHidden: false }
+    if (search) {
+      const normalized = search.replace(/\s+/g, ' ')
+      const tokens = normalized.split(' ').filter(Boolean)
+      const curpCandidate = normalized.toUpperCase()
+      patientWhere.OR = [
+        { AND: tokens.map(token => ({ OR: [
+          { firstName: { contains: token, mode: 'insensitive' as const } },
+          { lastName:  { contains: token, mode: 'insensitive' as const } },
+        ] })) },
+        { curp: { contains: curpCandidate } },
+      ]
+    }
+    return patientWhere
+  }
+
   async listAll(medicoId: string, opts: {
     page: number; limit: number; search?: string; from?: Date; to?: Date; riskLevel?: RiskLevel
   }) {

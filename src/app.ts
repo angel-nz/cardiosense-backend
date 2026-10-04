@@ -19,6 +19,7 @@ import { createPatientRouter } from '@/modules/patients/patient.routes'
 import { createRecordRouter }  from '@/modules/health-records/record.routes'
 import { createPredictionRouter } from '@/modules/predictions/prediction.routes'
 import { createAlertRouter }      from '@/modules/alerts/alert.routes'
+import { createRiskForecastRouter } from '@/modules/risk-forecasts/forecast.routes'  // NEW S2D
 
 export function createApp(io?: IOServer) {
   const app = express()
@@ -80,6 +81,7 @@ export function createApp(io?: IOServer) {
   app.use('/api/health-records', createRecordRouter(io))
   app.use('/api/predictions',    createPredictionRouter(io))
   app.use('/api/alerts',         createAlertRouter(io))
+  app.use('/api/risk-forecasts', createRiskForecastRouter())   // NEW S2D — read-only projections
 
   // ─── 404 ─────────────────────────────────────────────────────────
   app.use((_req, res) => {

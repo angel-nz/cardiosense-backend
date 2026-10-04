@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express'
 import type { AuthRequest } from '@/types'
 import type { Server as IOServer } from 'socket.io'
 import { PatientService } from './patient.service'
+import { withClinicalLatest } from './clinicalLatest'
 import type {
   HistoryQueryDtoType,
   PatientStatusDtoType,
@@ -12,6 +13,10 @@ import type {
 
 export function createPatientController(io?: IOServer) {
   const svc = new PatientService(io)
+  // NEW S3 — every single-patient response carries the clinical-time read
+  // model (latestClinicalAt + clinically latest Prediction), so a personal-
+  // info edit can never move the user-visible "Última actualización".
+  const decorate = async <T extends { id: string }>(p: T) => (await withClinicalLatest([p]))[0]
 
   const list = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
@@ -23,21 +28,21 @@ export function createPatientController(io?: IOServer) {
   const getOne = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const patient = await svc.getOne(req.user.sub, req.params.id)
-      res.json(patient)
+      res.json(await decorate(patient))
     } catch (err) { next(err) }
   }
 
   const create = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const patient = await svc.create(req.user.sub, req.body)
-      res.status(201).json(patient)
+      res.status(201).json(await decorate(patient))
     } catch (err) { next(err) }
   }
 
   const update = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const patient = await svc.update(req.user.sub, req.params.id, req.body)
-      res.json(patient)
+      res.json(await decorate(patient))
     } catch (err) { next(err) }
   }
 
@@ -49,7 +54,7 @@ export function createPatientController(io?: IOServer) {
     try {
       const { isActive } = req.body as PatientStatusDtoType
       const patient = await svc.setStatus(req.user.sub, req.params.id, isActive)
-      res.json(patient)
+      res.json(await decorate(patient))
     } catch (err) { next(err) }
   }
 
@@ -62,7 +67,7 @@ export function createPatientController(io?: IOServer) {
       const patient = isHidden
         ? await svc.hide(req.user.sub, req.params.id)
         : await svc.show(req.user.sub, req.params.id)
-      res.json(patient)
+      res.json(await decorate(patient))
     } catch (err) { next(err) }
   }
 

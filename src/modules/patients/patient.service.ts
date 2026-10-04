@@ -7,24 +7,22 @@ import {
 // (moved out of patient.dto.ts, which no longer defines it).
 import { isCanonicalPhone, PHONE_MESSAGE } from '@/lib/phone'
 import { PatientRepository } from './patient.repository'
+import { buildClinicalCalendarEvents } from './clinicalCalendar'
 import { paginate } from '@/types'
 import type {
   CreatePatientDtoType, UpdatePatientDtoType, PatientQueryDtoType, HistoryQueryDtoType,
   HiddenPatientQueryDtoType,
 } from './patient.dto'
 import type { Server as IOServer } from 'socket.io'
-import { HealthRecordRepository } from '@/modules/health-records/record.repository'
-import { PredictionRepository } from '@/modules/predictions/prediction.repository'
+import { toPredictionListItem } from '@/modules/predictions/prediction.serializer'
 import { AlertService } from '@/modules/alerts/alert.service'
-import {
-  toClinicalRecordEvent, toPredictionEvent,
-  deriveRiskChanges, sortTimelineEvents,
-  type PatientTimelineEvent,
-} from './patient.timeline'
+import { TransactionCommitVerificationError } from '@/lib/errors'
+import { scheduleForecastOrchestration, scheduleLifecycleReconcile } from '@/modules/risk-forecasts/forecast.triggers'
+import { supersedeCurrentForLifecycleInTx, verifyLifecycleSupersessionCommitted, FORECAST_SOCKET_EVENT } from '@/modules/risk-forecasts/forecast.orchestrator'
+import type { PatientTimelineEvent } from './patient.timeline'
+import { withClinicalLatest, orderedClinicalPredictionIds } from './clinicalLatest'
 
 const repo = new PatientRepository()
-const recordRepo = new HealthRecordRepository()
-const predictionRepo = new PredictionRepository()
 
 // Z5 — the exact fields that count as patient PERSONAL information for
 // INFO_PATIENT_UPDATED, kept as one small, named function rather than
@@ -77,7 +75,8 @@ export class PatientService {
       risk:   query.risk,
       status: query.status,
     })
-    return paginate(data, total, query.page, query.limit)
+    // NEW S3 — latestClinicalAt + clinically latest Prediction (current risk).
+    return paginate(await withClinicalLatest(data), total, query.page, query.limit)
   }
 
   async getOne(userId: string, patientId: string) {
@@ -169,6 +168,14 @@ export class PatientService {
     const patient = await repo.update(patientId, dto)
     this.emitPatientUpdated(patient)
 
+    // NEW S2D — sex / birthDate are S forecast inputs (fingerprinted): an
+    // ACTUAL change on an ACTIVE + visible patient re-evaluates S after this
+    // update committed. Never awaited; never fails the update.
+    if ((current.sex !== patient.sex || current.birthDate.getTime() !== patient.birthDate.getTime()) &&
+        patient.isActive && !patient.isHidden) {
+      scheduleForecastOrchestration(patient.id, 'DEMOGRAPHICS_CHANGED', this.io)
+    }
+
     // Z5 — INFO_PATIENT_UPDATED, created only when actual personal
     // information changed (personalInfoChanged, top of file) — never
     // merely because this PATCH endpoint was called, and never for an
@@ -246,7 +253,30 @@ export class PatientService {
   // architecture introduced by this block.
   async setStatus(userId: string, patientId: string, isActive: boolean) {
     const current = await this.getOne(userId, patientId)
-    const patient = await repo.setActive(patientId, isActive)
+    let patient
+    if (!isActive) {
+      // NEW S2D — leaving ACTIVE supersedes the CURRENT forecast set (reason
+      // PATIENT_LEFT_ACTIVE, no replacement) in the SAME transaction as the
+      // lifecycle mutation. Prisma may resolve a transaction whose COMMIT was
+      // rolled back (S2C-FIX1), so both effects are re-read before anything
+      // is emitted.
+      const res = await prisma.$transaction(async tx => {
+        const p = await repo.setActive(patientId, false, tx)
+        const supersededSetId = await supersedeCurrentForLifecycleInTx(tx, patientId, 'PATIENT_LEFT_ACTIVE')
+        return { p, supersededSetId }
+      })
+      const visible = await prisma.paciente.findUnique({ where: { id: patientId }, select: { isActive: true } })
+      if (!visible || visible.isActive !== false) throw new TransactionCommitVerificationError('LIFECYCLE_PATIENT_STATE')
+      if (res.supersededSetId) {
+        await verifyLifecycleSupersessionCommitted(res.supersededSetId)
+        try { this.io?.to(`patient:${patientId}`).emit(FORECAST_SOCKET_EVENT, { patientId, currentSetId: null, cause: 'PATIENT_LEFT_ACTIVE' }) } catch { /* best effort */ }
+      }
+      patient = res.p
+    } else {
+      patient = await repo.setActive(patientId, true)
+      // NEW S2D — reactivation re-evaluates S after the transition committed.
+      if (!current.isActive) scheduleForecastOrchestration(patientId, 'PATIENT_REACTIVATED', this.io)
+    }
     this.emitPatientUpdated(patient)
 
     // PRE-R2F — same duplication rule: `patientName` already renders as
@@ -285,6 +315,8 @@ export class PatientService {
     if (patient.isActive) throw new PatientMustBeInactiveToHideError()
     const updated = await repo.setHidden(patientId, true)
     this.emitPatientUpdated(updated)
+    // NEW S2D — defensive: a hidden patient can never keep a CURRENT forecast.
+    scheduleLifecycleReconcile({ patientIds: [patientId] }, this.io)
     return updated
   }
 
@@ -304,6 +336,8 @@ export class PatientService {
     if (!patient) throw new NotFoundError('Patient')
     const updated = await repo.setHidden(patientId, false)
     this.emitPatientUpdated(updated)
+    // NEW S2D — defensive: SHOW leaves the patient INACTIVE_VISIBLE (no forecast).
+    scheduleLifecycleReconcile({ patientIds: [patientId] }, this.io)
     return updated
   }
 
@@ -318,6 +352,8 @@ export class PatientService {
   async bulkSetVisibility(userId: string, isHidden: boolean): Promise<{ affectedCount: number }> {
     const medico = await this.getMedicoOrThrow(userId)
     const affectedCount = await repo.bulkSetVisibility(medico.id, isHidden)
+    // NEW S2D — defensive: no non-ACTIVE patient of this doctor keeps a CURRENT forecast.
+    scheduleLifecycleReconcile({ medicoId: medico.id }, this.io)
     return { affectedCount }
   }
 
@@ -346,7 +382,17 @@ export class PatientService {
 
   async getHistory(userId: string, patientId: string, opts: HistoryQueryDtoType) {
     await this.getOne(userId, patientId)
-    return repo.getHistory(patientId, opts)
+    const history = await repo.getHistory(patientId, opts)
+    // NEW S3 — the embedded (latest 20) Predictions follow the canonical
+    // CLINICAL order (source record effective time → recordedAt → id →
+    // predictedAt → id), not calculation time.
+    const ids = (await orderedClinicalPredictionIds({ patientIds: [patientId] })).slice(0, 20)
+    const rows = ids.length ? await prisma.prediction.findMany({ where: { id: { in: ids } } }) : []
+    const byId = new Map(rows.map(r => [r.id, r]))
+    const predictions = ids.map(id => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined)
+    // R4F — embedded Predictions use the Prediction LIST contract (no
+    // provenance, no sexUsed; legacy normalized) — prediction.serializer.ts.
+    return { ...history, predictions: predictions.map(toPredictionListItem) }
   }
 
   // P2 — GET /patients/:patientId/timeline. Read-side aggregation only
@@ -355,39 +401,10 @@ export class PatientService {
   async getTimeline(userId: string, patientId: string, from?: Date, to?: Date): Promise<PatientTimelineEvent[]> {
     await this.getOne(userId, patientId)
 
-    // Z2 — Alert-model events removed from the Patient timeline (was a 4th
-    // parallel query, alertRepo.findInRangeForPatient; RISK_CHANGE is
-    // unaffected — it is derived from Predictions, not read from the Alert
-    // table). Query set: HealthRecords in range, Predictions in range, and
-    // — only if `from` is given — the single predecessor Prediction for
-    // RISK_CHANGE context (section 19). No N+1: each is one query
-    // regardless of result size.
-    const [records, predictionsInRange, predecessor] = await Promise.all([
-      recordRepo.findInRange(patientId, from, to),
-      predictionRepo.findInRange(patientId, from, to),
-      from ? predictionRepo.findPredecessor(patientId, from) : Promise.resolve(null),
-    ])
-
-    const clinicalEvents = records.map(toClinicalRecordEvent)
-    const predictionEvents = predictionsInRange.map(toPredictionEvent)
-
-    // The predecessor (if any) is prepended ONLY for deriving the first
-    // in-range transition — predictionsInRange is already
-    // predictedAt-asc/id-asc from the repository, and the predecessor is
-    // strictly earlier than every item in it (predictedAt < from <= every
-    // in-range predictedAt), so no re-sort is needed. It is never mapped
-    // to its own PREDICTION event (section 19/20) — only predictionEvents
-    // above (built from predictionsInRange alone) becomes PREDICTION
-    // events in the response.
-    const sequence = predecessor ? [predecessor, ...predictionsInRange] : predictionsInRange
-    const riskChangeEvents = deriveRiskChanges(sequence)
-
-    const events: PatientTimelineEvent[] = [
-      ...clinicalEvents,
-      ...predictionEvents,
-      ...riskChangeEvents,
-    ]
-    return sortTimelineEvents(events)
+    // Z2 — no Alert-model events. NEW S2E-FIX3 — clinical-time calendar (clinicalCalendar.ts): records at
+    // their effective clinical time, AUTOMATIC predictions at their source
+    // record's clinical time, LEGACY_UNKNOWN only inside record detail.
+    return buildClinicalCalendarEvents({ patientId }, from, to)
   }
 
   private emitPatientUpdated(patient: { id: string; firstName: string; lastName: string; isActive: boolean }) {

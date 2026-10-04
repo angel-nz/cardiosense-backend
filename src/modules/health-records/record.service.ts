@@ -1,17 +1,18 @@
 import { prisma } from '@/config/prisma'
-import {
-  NotFoundError, ForbiddenError, ModelIneligibleError, PatientInactiveError,
-  ServiceUnavailableError, AIInputRejectedError, AIServiceError,
-} from '@/lib/errors'
-import { logger } from '@/lib/logger'
-import { calculateAge } from '@/lib/age'
+import { NotFoundError, ForbiddenError, PatientInactiveError, InvalidMeasuredAtError } from '@/lib/errors'
+import { calculateAgeAtClinicalTime } from '@/lib/age'
+import { clinicalDayOf, utcDateToISODate } from '@/lib/timezone'
 import { HealthRecordRepository } from './record.repository'
-import { PredictionService } from '@/modules/predictions/prediction.service'
+import { automaticPredictionWorker } from '@/modules/predictions/automatic/automaticPrediction.worker'
 import { AlertService } from '@/modules/alerts/alert.service'
-import type { CreateRecordDtoType } from './record.dto'
+import { scheduleForecastOrchestration } from '@/modules/risk-forecasts/forecast.triggers'
+import type { CreateHealthRecordRequestDtoType } from './record.dto'
 import type { Server as IOServer } from 'socket.io'
 
 const repo = new HealthRecordRepository()
+
+// NEW S2A — allowed clock skew for a clinician-entered measuredAt (S1-FIX1 §4.8).
+export const MEASURED_AT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 
 export class HealthRecordService {
   constructor(private readonly io?: IOServer) {}
@@ -23,7 +24,7 @@ export class HealthRecordService {
   // already used by prediction_completed — NOT the full record, so the
   // frontend must refetch via the existing recordService rather than
   // fabricate missing fields client-side.
-  async create(userId: string, dto: CreateRecordDtoType) {
+  async create(userId: string, dto: CreateHealthRecordRequestDtoType) {
     // Verify patient belongs to this doctor — now returns the owned Patient
     // (U3.2) so age derivation below reuses it instead of a second query.
     // assertPatientOwnership() below already excludes isHidden=true patients
@@ -50,9 +51,43 @@ export class HealthRecordService {
     // describe one canonical instant. Any `dto.age` the client might still
     // send (now optional, kept only for legacy callers — see record.dto.ts)
     // is always overwritten here, never trusted.
+    //
+    // NEW S2A — REAL clinical time (A3/A4, S1-FIX1 §4). `recordedAt` keeps its
+    // exact previous meaning (this request's entry instant, R's frozen time
+    // axis); `measuredAt` is the clinician's REAL clinical instant, required
+    // and already format-validated by CreateHealthRecordRequestDto. Bounds
+    // are checked against the SAME single `now` used for recordedAt, before
+    // any write (no HealthRecord, no Prediction, no Alert on failure):
+    //   measuredAt ≤ now + 5 min           (back-dating is allowed)
+    //   clinicalDay(measuredAt) ≥ birthDate (Guadalajara calendar)
+    // `age` now describes the record's CLINICAL day, not its entry instant:
+    // calendar age on the Guadalajara day of measuredAt. Legacy rows keep
+    // their stored age; any client-sent `age` is still ignored.
+    // clinicalTimeSource is server-assigned (the DTO rejects a client value).
     const now = new Date()
-    const age = calculateAge(patient.birthDate, now)
-    const record = await repo.create(userId, { ...dto, age, recordedAt: now })
+    const measuredAt = dto.measuredAt
+    if (measuredAt.getTime() > now.getTime() + MEASURED_AT_MAX_FUTURE_SKEW_MS) {
+      throw new InvalidMeasuredAtError('MEASURED_AT_IN_FUTURE')
+    }
+    if (clinicalDayOf(measuredAt) < utcDateToISODate(patient.birthDate)) {
+      throw new InvalidMeasuredAtError('MEASURED_AT_BEFORE_BIRTH')
+    }
+    const age = calculateAgeAtClinicalTime(patient.birthDate, measuredAt)
+    const { clinicalTimeSource: _rejectedByDto, ...clinical } = dto
+    // NEW S4 — the HealthRecord and its durable automatic-Prediction
+    // obligation are persisted ATOMICALLY (one transaction, no external I/O
+    // inside it). The HTTP request succeeds once this COMMITs; AI scoring
+    // happens afterwards in the durable worker, so an AI outage can never
+    // lose the obligation nor fail the record creation.
+    const record = await prisma.$transaction(async tx => {
+      const created = await repo.create(userId, {
+        ...clinical, age, recordedAt: now, measuredAt, clinicalTimeSource: 'CLINICIAN_ENTERED',
+      }, tx)
+      await tx.automaticPredictionTask.create({
+        data: { healthRecordId: created.id, patientId: created.patientId, status: 'PENDING', attemptCount: 0, nextAttemptAt: now, createdAt: now },
+      })
+      return created
+    })
     this.io?.to(`patient:${record.patientId}`).emit('health_record_created', {
       recordId:   record.id,
       patientId:  record.patientId,
@@ -100,90 +135,25 @@ export class HealthRecordService {
     // Q1 Decision 1). PredictionService owns 100% of the prediction logic
     // (AI call, persistence, alerting, prediction_completed emission) —
     // this only orchestrates the call, using the same `io` instance so the
-    // eventual prediction_completed reaches the same rooms as any manual
-    // prediction would. Errors are caught here so a failed/slow AI Service
+    // eventual prediction_completed reaches the patient/doctor rooms. NEW
+    // S2E-FIX4 — this is the ONLY Prediction creation path (no manual API). Errors are caught here so a failed/slow AI Service
     // can never surface as an unhandled rejection or affect this request.
-    new PredictionService(this.io)
-      .predict(userId, { patientId: record.patientId, healthRecordId: record.id })
-      .catch(err => {
-        // U8.6C — MODEL_INELIGIBLE is an expected domain outcome (the
-        // current model does not support this record's age), never a
-        // technical failure. No Prediction/Alert/prediction_completed is
-        // produced for it (by design, inside predict() itself — nothing
-        // changes here about that). Logged at `info`, not `error` — this
-        // is not something operationally wrong. The dedicated
-        // `prediction_unavailable` event lets a doctor currently viewing
-        // this patient learn the outcome without polling; `userId` here is
-        // the SAME authenticated doctor already used for
-        // `dashboard_activity_changed` above — never derived from anything
-        // client-supplied at this point, so this can only ever reach the
-        // room of the doctor who created this exact record.
-        if (err instanceof ModelIneligibleError) {
-          logger.info('Automatic prediction skipped: model ineligible', {
-            recordId: record.id,
-            patientId: record.patientId,
-            age: record.age,
-            modelVersion: err.modelVersion,
-          })
-          this.io?.to(`user:${userId}`).emit('prediction_unavailable', {
-            patientId: record.patientId,
-            healthRecordId: record.id,
-            reason: 'MODEL_INELIGIBLE',
-            modelVersion: err.modelVersion,
-            eligibleAgeRange: err.eligibleAgeRange,
-          })
-          return
-        }
-        // Technical/unexpected failures (AI unreachable, AI 500/502, etc.)
-        // keep the original error-level log — nothing here changes for
-        // that case, and no prediction_unavailable is emitted for it
-        // (that event means "the record is fine, the model just doesn't
-        // support it" — never "something went wrong").
-        logger.error('Automatic prediction failed for new health record', {
-          recordId: record.id,
-          patientId: record.patientId,
-          err: err instanceof Error ? err.message : err,
-        })
+    // NEW S2D — S forecast orchestration for the new REAL record, scheduled
+    // independently of the automatic Prediction (which may fail, be
+    // ineligible or be slow). Never awaited, never throws into this request;
+    // a later verified Prediction re-triggers via ANCHOR_PREDICTION_PERSISTED.
+    scheduleForecastOrchestration(record.patientId, 'HEALTH_RECORD_CREATED', this.io)
 
-        // W4.2 — prediction_failed. Additive, technical-failure-only signal
-        // so the asynchronous automatic (record-creation-triggered) path is
-        // not silent to the frontend beyond this log line. Scoped
-        // EXCLUSIVELY to this automatic catch — never emitted from
-        // PredictionService.predict() itself, and never reached by the
-        // manual POST /predictions path (that endpoint already surfaces
-        // any of these same error classes synchronously as an HTTP error
-        // response to the caller that made the request; emitting a
-        // redundant socket event for that call would double-report the
-        // same failure). MODEL_INELIGIBLE is deliberately excluded from
-        // this enum — it is handled above as prediction_unavailable, a
-        // distinct domain outcome, not a technical failure. Mapping is
-        // exhaustive over every error class mapAIError() (aiClient.ts) and
-        // getModelCapabilities() can actually throw:
-        //   ServiceUnavailableError -> AI_UNAVAILABLE (AI unreachable, or
-        //     AI's own 503 "model not loaded")
-        //   AIInputRejectedError    -> AI_INPUT_REJECTED (AI's own 422)
-        //   AIServiceError          -> AI_FAILURE (any other AI failure)
-        // Any OTHER error reaching this catch (e.g. a NotFoundError/
-        // ForbiddenError from predict()'s own patient/health-record
-        // resolution — not expected in practice, since this call always
-        // reuses the same userId/record this method itself just verified)
-        // is intentionally left unmapped: it would not be semantically
-        // correct to tell the doctor "AI_FAILURE" for a failure that has
-        // nothing to do with the AI service. It remains covered by the
-        // logger.error call above only, same as before this change.
-        let reason: 'AI_UNAVAILABLE' | 'AI_INPUT_REJECTED' | 'AI_FAILURE' | null = null
-        if (err instanceof ServiceUnavailableError) reason = 'AI_UNAVAILABLE'
-        else if (err instanceof AIInputRejectedError) reason = 'AI_INPUT_REJECTED'
-        else if (err instanceof AIServiceError) reason = 'AI_FAILURE'
-
-        if (reason) {
-          this.io?.to(`user:${userId}`).emit('prediction_failed', {
-            patientId: record.patientId,
-            healthRecordId: record.id,
-            reason,
-          })
-        }
-      })
+    // NEW S4 — the automatic Prediction is produced by the durable worker
+    // (modules/predictions/automatic): this only asks for a prompt pass. The
+    // obligation itself is already committed above, so a crash, restart or
+    // AI outage from here on is recovered automatically (startup recovery,
+    // periodic polling, lease expiry, bounded retry). NEW S4-FIX2: a record
+    // whose clinical age the CURRENT model cannot score (MODEL_INELIGIBLE) ends
+    // as a terminal BLOCKED/MODEL_INELIGIBLE task (never retried, no Prediction)
+    // and emits prediction_unavailable once; technical failures →
+    // prediction_failed are emitted by the worker with automatic retry.
+    automaticPredictionWorker.kick()
 
     return record
   }

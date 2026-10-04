@@ -2,8 +2,9 @@ import axios from 'axios'
 import { env } from '@/config/env'
 import { logger } from '@/lib/logger'
 import { AppError, ServiceUnavailableError, AIInputRejectedError, AIServiceError } from '@/lib/errors'
-import type { AIPredictionResponse } from '@/types'
 import type { HealthRecord } from '@prisma/client'
+import { toPersonalizationRequest } from '@/modules/predictions/personalization/evidence.builder'
+import { parseGlobalAIResult, type GlobalAIResult } from '@/modules/predictions/personalization/personalization.outcome'
 
 const aiClient = axios.create({
   baseURL: env.AI_SERVICE_URL,
@@ -15,7 +16,7 @@ const aiClient = axios.create({
 })
 
 // U4.2B — sex is now the canonical Paciente.sex value, supplied by the
-// caller (PredictionService.predict(), which already fetches the owned
+// caller (PredictionService.predictFromHealthRecord(), which already fetches the owned
 // Patient for ownership verification — no new query needed here or there).
 // Encoding is already identical end-to-end (0=female/1=male, confirmed
 // against ai-service/app/schemas.py and inference.py's direct
@@ -38,12 +39,38 @@ function buildFeatures(record: HealthRecord, sex: number) {
   }
 }
 
-export async function callAIPredict(record: HealthRecord, sex: number): Promise<AIPredictionResponse> {
+// NEW R (R4E) — the optional /predict `personalization` block is EXACTLY the
+// validated R4B projection (version, raw_counts, units; no ids, no absolute
+// timestamps, no identity). Typed from the projection itself, never a second
+// hand-written copy of the wire contract.
+export type AIPersonalizationRequest = ReturnType<typeof toPersonalizationRequest>
+
+export interface AIPredictCallResult {
+  // Validated GLOBAL top-level result (R4D: top-level is ALWAYS global).
+  global: GlobalAIResult
+  // Raw, still-unvalidated `personalization` value (undefined if absent).
+  // Validated by personalization.outcome.ts — never trusted as-is.
+  personalizationRaw: unknown
+}
+
+// ONE HTTP call. With `personalization` the AI returns the global top-level
+// result AND the personalization block from the same request (R3/R4D);
+// without it, the legacy global-only contract.
+export async function callAIPredict(
+  record: HealthRecord,
+  sex: number,
+  personalization?: AIPersonalizationRequest,
+): Promise<AIPredictCallResult> {
+  let data: unknown
   try {
-    const payload = buildFeatures(record, sex)
-    logger.debug('Calling AI service', { payload })
-    const { data } = await aiClient.post<AIPredictionResponse>('/predict', payload)
-    return data
+    const payload = personalization ? { ...buildFeatures(record, sex), personalization } : buildFeatures(record, sex)
+    // R4E — safe metadata only: never the clinical payload or the history.
+    logger.debug('Calling AI service', {
+      personalization: Boolean(personalization),
+      units: personalization ? personalization.units.length : 0,
+    })
+    const res = await aiClient.post<unknown>('/predict', payload)
+    data = res.data
   } catch (err) {
     const mapped = mapAIError(err)
     logger.error('AI service error', { ...describeAIError(err), mappedCode: mapped.code })
@@ -58,6 +85,17 @@ export async function callAIPredict(record: HealthRecord, sex: number): Promise<
     // payload (422) is not "unavailable". Still never a fallback prediction.
     throw mapped
   }
+  // R4E — the mandatory GLOBAL result must be valid; otherwise this is an AI
+  // failure (no Prediction, no Alert), never a personalization fallback.
+  const global = parseGlobalAIResult(data)
+  if (!global) {
+    logger.error('AI service returned an invalid global result', { mappedCode: 'AI_FAILURE' })
+    throw new AIServiceError()
+  }
+  const personalizationRaw = typeof data === 'object' && data !== null
+    ? (data as Record<string, unknown>).personalization
+    : undefined
+  return { global, personalizationRaw }
 }
 
 // U8.6B — model capability contract, owned by the model artifact

@@ -17,6 +17,14 @@ interface ClinicalRecordMetadata {
   healthRecordId: string
   sysBP: number
   diaBP: number
+  // NEW S2E-FIX3 (clinicalCalendar.ts) — additive. eventDate is now the
+  // record's EFFECTIVE clinical time; these disclose its provenance and list
+  // the record's LEGACY_UNKNOWN (historical, origin not provable) predictions
+  // — never own events, never labelled automatic. NEW S2E-FIX4 — renamed from
+  // `reanalyses`: manual reanalysis no longer exists.
+  clinicalTimeSource?: 'CLINICIAN_ENTERED' | 'LEGACY_ENTRY_TIME'
+  recordedAt?: string
+  historicalPredictions?: Array<{ predictionId: string; origin: 'LEGACY_UNKNOWN'; predictedAt: string; riskScore: number; riskLevel: string; modelVersion: string | null }>
 }
 
 interface PredictionMetadata {
@@ -27,6 +35,11 @@ interface PredictionMetadata {
   isAnomaly: boolean
   anomalyScore: number | null
   modelVersion: string | null
+  // NEW S2E-FIX3 — additive. Calendar PREDICTION events are AUTOMATIC only and
+  // dated at the source record's clinical time; predictedAt = calculation time.
+  origin?: 'AUTOMATIC_HEALTH_RECORD'
+  predictedAt?: string
+  clinicalTimeSource?: 'CLINICIAN_ENTERED' | 'LEGACY_ENTRY_TIME'
 }
 
 interface RiskChangeMetadata {
@@ -34,6 +47,15 @@ interface RiskChangeMetadata {
   toLevel: string
   previousPredictionId: string
   currentPredictionId: string
+  // NEW S2E-FIX4 / S3 — provenance of the change (source record + times).
+  healthRecordId?: string
+  clinicalTimeSource?: 'CLINICIAN_ENTERED' | 'LEGACY_ENTRY_TIME'
+  currentPredictedAt?: string
+  // NEW S3 — eventDate is the GENERATED time (= generatedAt = current
+  // prediction's predictedAt); clinicalAt = source record's effective
+  // clinical time, kept as context. Supersedes FIX4's clinical placement.
+  clinicalAt?: string
+  generatedAt?: string
 }
 
 // W2.2 — `groupId` is a DERIVED, API-only field (never persisted — no new

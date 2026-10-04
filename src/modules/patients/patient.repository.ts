@@ -1,4 +1,5 @@
 import { prisma } from '@/config/prisma'
+import { currentPredictionsOfLatestClinicalRecord, orderPatientIdsByLatestClinical } from './clinicalLatest'
 import type { CreatePatientDtoType, UpdatePatientDtoType } from './patient.dto'
 import type { RiskLevel, Prisma } from '@prisma/client'
 
@@ -11,6 +12,10 @@ import type { RiskLevel, Prisma } from '@prisma/client'
 export type PatientStatusFilter = 'ACTIVE' | 'INACTIVE' | 'ALL'
 
 export class PatientRepository {
+  // NEW S3-FIX1 — SUPERSEDED rationale below: "current risk" is now the
+  // Prediction of the patient's EXACT clinically latest HealthRecord
+  // (clinicalLatest.ts::currentPredictionsOfLatestClinicalRecord), shared
+  // with the dashboard distribution; the historical X2 text is kept for audit.
   // X2 — `risk` filters the dataset BEFORE pagination, matching the EXACT
   // "current risk" semantics already established and validated by
   // dashboard.repository.ts::findPatientsWithLatestRisk / dashboard.service.ts's
@@ -63,43 +68,23 @@ export class PatientRepository {
       }),
     }
 
-    let where: Prisma.PacienteWhereInput = baseWhere
+    // NEW S3 — clinical-time-first: "current risk" = the Prediction of the
+    // EXACT clinically latest record (S3-FIX1 strict rule: no Prediction on
+    // that record ⇒ no current risk ⇒ matches no risk filter), and the default order is
+    // the patient's latest CLINICAL time DESC (never Paciente.updatedAt,
+    // which only reflects personal-info edits). Both are resolved dataset-
+    // wide BEFORE pagination; `total` uses the same filtered id set.
+    let ids = (await prisma.paciente.findMany({ where: baseWhere, select: { id: true } })).map(p => p.id)
     if (risk) {
-      const candidates = await prisma.paciente.findMany({
-        where: baseWhere,
-        select: {
-          id: true,
-          predictions: {
-            orderBy: { predictedAt: 'desc' },
-            take: 1,
-            select: { riskLevel: true },
-          },
-        },
-      })
-      const matchedIds = candidates
-        .filter(p => p.predictions[0]?.riskLevel === risk)
-        .map(p => p.id)
-      where = { ...baseWhere, id: { in: matchedIds } }
+      const latest = await currentPredictionsOfLatestClinicalRecord(ids)
+      ids = ids.filter(id => latest.get(id)?.riskLevel === risk)
     }
-
-    const [data, total] = await prisma.$transaction([
-      prisma.paciente.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { updatedAt: 'desc' },
-        include: {
-          predictions: {
-            orderBy: { predictedAt: 'desc' },
-            take: 1,
-            select: { riskLevel: true, riskScore: true, predictedAt: true },
-          },
-        },
-      }),
-      prisma.paciente.count({ where }),
-    ])
-
-    return { data, total }
+    const ordered = await orderPatientIdsByLatestClinical(ids)
+    const pageIds = ordered.slice(skip, skip + limit)
+    const rows = pageIds.length ? await prisma.paciente.findMany({ where: { id: { in: pageIds } } }) : []
+    const byId = new Map(rows.map(r => [r.id, r]))
+    const data = pageIds.map(id => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined)
+    return { data, total: ids.length }
   }
 
   // Z8 §26 — every standard Doctor-facing patient read/write (GET/PUT
@@ -181,8 +166,10 @@ export class PatientRepository {
   // (PatientService.setStatus) has already resolved/validated the patient
   // (ownership, not-hidden, hidden-cannot-reactivate-directly) before this
   // is reached; this method is the bare, unconditional write.
-  async setActive(id: string, isActive: boolean) {
-    return prisma.paciente.update({ where: { id }, data: { isActive } })
+  // NEW S2D — optional transaction client so a deactivation can supersede
+  // the patient's CURRENT forecast set in the SAME transaction.
+  async setActive(id: string, isActive: boolean, client: Pick<Prisma.TransactionClient, 'paciente'> = prisma) {
+    return client.paciente.update({ where: { id }, data: { isActive } })
   }
 
   // Z8 §10/§11 — one explicit, reversible visibility setter for BOTH
@@ -298,6 +285,7 @@ export class PatientRepository {
     page: number; limit: number; sortBy: string; sortOrder: 'asc' | 'desc'; from?: string; to?: string; targetId?: string
   }) {
     const { page, limit, sortBy, sortOrder, from, to, targetId } = opts
+    if (sortBy === 'clinicalTime') return this.getHistoryByClinicalTime(patientId, { page, limit, sortOrder, from, to, targetId })
     const dateFilter = from || to ? {
       recordedAt: {
         ...(from ? { gte: new Date(from) } : {}),
@@ -351,6 +339,100 @@ export class PatientRepository {
         take: 20,
       }),
     ])
+
+    return {
+      records: { data, total, page: resolvedPage, limit, totalPages: Math.ceil(total / limit) },
+      predictions,
+      ...(targetId !== undefined ? { targetResolved } : {}),
+    }
+  }
+
+  // NEW S2E-FIX2 — Clinical History ordered by EFFECTIVE CLINICAL TIME,
+  // globally (before OFFSET/LIMIT), read-only:
+  //   effective = measured_at  when clinical_time_source = 'CLINICIAN_ENTERED'
+  //               (and measured_at is present),
+  //               recorded_at  otherwise (legacy rows; a malformed
+  //               CLINICIAN_ENTERED row without measured_at also falls back to
+  //               recorded_at — it is never presented as measured).
+  //   DESC: effective DESC, recorded_at DESC, id DESC
+  //   ASC:  effective ASC,  recorded_at ASC,  id ASC
+  // `id` compares bytewise (COLLATE "C") so the tie-break is a fixed total
+  // order. Prisma's orderBy cannot express the COALESCE, so the ordered id
+  // page is selected with a parameterized $queryRaw (all values are bound
+  // parameters; the direction is chosen between two fixed statements — no
+  // string interpolation), then the full rows are loaded by id and returned
+  // in that exact order. The optional from/to filter keeps its existing
+  // recorded_at semantics. targetId resolution uses the SAME total order
+  // (row_number over the identical ORDER BY). HealthRecord persistence and
+  // every R/S read path are untouched.
+  private async getHistoryByClinicalTime(patientId: string, opts: {
+    page: number; limit: number; sortOrder: 'asc' | 'desc'; from?: string; to?: string; targetId?: string
+  }) {
+    const { page, limit, sortOrder, targetId } = opts
+    const fromIso = opts.from ? new Date(opts.from).toISOString() : null
+    const toIso = opts.to ? new Date(opts.to).toISOString() : null
+    const where = {
+      patientId,
+      ...(opts.from || opts.to ? { recordedAt: { ...(opts.from ? { gte: new Date(opts.from) } : {}), ...(opts.to ? { lte: new Date(opts.to) } : {}) } } : {}),
+    }
+
+    let resolvedPage = page
+    let targetResolved: boolean | undefined
+    if (targetId) {
+      const rows = (sortOrder === 'desc'
+        ? await prisma.$queryRaw`
+            SELECT pos::int AS pos FROM (
+              SELECT id, row_number() OVER (ORDER BY
+                COALESCE(CASE WHEN clinical_time_source = 'CLINICIAN_ENTERED' THEN measured_at END, recorded_at) DESC,
+                recorded_at DESC, id COLLATE "C" DESC) - 1 AS pos
+              FROM health_records
+              WHERE patient_id = ${patientId}
+                AND (${fromIso}::text IS NULL OR recorded_at >= (${fromIso}::timestamptz AT TIME ZONE 'UTC'))
+                AND (${toIso}::text IS NULL OR recorded_at <= (${toIso}::timestamptz AT TIME ZONE 'UTC'))
+            ) s WHERE id = ${targetId}`
+        : await prisma.$queryRaw`
+            SELECT pos::int AS pos FROM (
+              SELECT id, row_number() OVER (ORDER BY
+                COALESCE(CASE WHEN clinical_time_source = 'CLINICIAN_ENTERED' THEN measured_at END, recorded_at) ASC,
+                recorded_at ASC, id COLLATE "C" ASC) - 1 AS pos
+              FROM health_records
+              WHERE patient_id = ${patientId}
+                AND (${fromIso}::text IS NULL OR recorded_at >= (${fromIso}::timestamptz AT TIME ZONE 'UTC'))
+                AND (${toIso}::text IS NULL OR recorded_at <= (${toIso}::timestamptz AT TIME ZONE 'UTC'))
+            ) s WHERE id = ${targetId}`) as { pos: number }[]
+      if (rows.length === 0) {
+        targetResolved = false
+      } else {
+        targetResolved = true
+        resolvedPage = Math.floor(Number(rows[0].pos) / limit) + 1
+      }
+    }
+    const skip = (resolvedPage - 1) * limit
+
+    const [idRows, total, predictions] = await prisma.$transaction([
+      sortOrder === 'desc'
+        ? prisma.$queryRaw<{ id: string }[]>`
+            SELECT id FROM health_records
+            WHERE patient_id = ${patientId}
+              AND (${fromIso}::text IS NULL OR recorded_at >= (${fromIso}::timestamptz AT TIME ZONE 'UTC'))
+              AND (${toIso}::text IS NULL OR recorded_at <= (${toIso}::timestamptz AT TIME ZONE 'UTC'))
+            ORDER BY COALESCE(CASE WHEN clinical_time_source = 'CLINICIAN_ENTERED' THEN measured_at END, recorded_at) DESC,
+                     recorded_at DESC, id COLLATE "C" DESC
+            OFFSET ${skip} LIMIT ${limit}`
+        : prisma.$queryRaw<{ id: string }[]>`
+            SELECT id FROM health_records
+            WHERE patient_id = ${patientId}
+              AND (${fromIso}::text IS NULL OR recorded_at >= (${fromIso}::timestamptz AT TIME ZONE 'UTC'))
+              AND (${toIso}::text IS NULL OR recorded_at <= (${toIso}::timestamptz AT TIME ZONE 'UTC'))
+            ORDER BY COALESCE(CASE WHEN clinical_time_source = 'CLINICIAN_ENTERED' THEN measured_at END, recorded_at) ASC,
+                     recorded_at ASC, id COLLATE "C" ASC
+            OFFSET ${skip} LIMIT ${limit}`,
+      prisma.healthRecord.count({ where }),
+      prisma.prediction.findMany({ where: { patientId }, orderBy: { predictedAt: 'desc' }, take: 20 }),
+    ])
+    const ids = idRows.map(r => r.id)
+    const byId = new Map((ids.length ? await prisma.healthRecord.findMany({ where: { id: { in: ids }, patientId } }) : []).map(r => [r.id, r]))
+    const data = ids.map(id => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined)
 
     return {
       records: { data, total, page: resolvedPage, limit, totalPages: Math.ceil(total / limit) },

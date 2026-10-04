@@ -30,26 +30,9 @@ export class DashboardRepository {
     })
   }
 
-  // I2/I4 — shared source: every patient of this médico (no pagination —
-  // this is an aggregate, not a page) with only their single most recent
-  // Prediction embedded (take: 1), same "current risk" definition already
-  // used and validated by patient.repository.ts (Bloque B), reimplemented
-  // here independently rather than imported, per the Bloque I instruction
-  // to keep Dashboard's queries self-contained and auditable on their own.
-  // Z8 §31 — isHidden=false added: hidden patients must not contribute to
-  // the risk-distribution widget.
-  async findPatientsWithLatestRisk(medicoId: string): Promise<Array<{ predictions: Array<{ riskLevel: string }> }>> {
-    return prisma.paciente.findMany({
-      where: { medicoId, isHidden: false },
-      select: {
-        predictions: {
-          orderBy: { predictedAt: 'desc' },
-          take: 1,
-          select: { riskLevel: true },
-        },
-      },
-    })
-  }
+  // NEW S3-FIX1 — findPatientsWithLatestRisk() REMOVED: it embedded the newest
+  // Prediction by predictedAt as "current risk" (unused since S3). Current risk
+  // is resolved ONLY by clinicalLatest.ts::currentPredictionsOfLatestClinicalRecord.
 
   // ─── O2 — Dashboard Calendar ──────────────────────────────────────────
   // All four queries below apply `medicoId` directly inside Prisma (never

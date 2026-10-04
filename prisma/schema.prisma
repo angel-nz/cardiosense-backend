@@ -21,6 +21,118 @@ enum RiskLevel {
   HIGH
 }
 
+// NEW R (R4A) — personalization outcome of a NEW-R Prediction. NULL on a
+// Prediction means a legacy / pre-NEW-R row (always a plain global
+// prediction). Only these four values exist: there is deliberately no
+// DEGRADED/APPLIED state (partial history exclusions keep INDIVIDUALIZED and
+// are recorded in personalizationProvenance counts).
+enum PersonalizationStatus {
+  INDIVIDUALIZED
+  GLOBAL_INSUFFICIENT_HISTORY
+  GLOBAL_INCOMPATIBLE_HISTORY
+  GLOBAL_ERROR_FALLBACK
+}
+
+// NEW S2E-FIX3 — WHY a Prediction exists. Server-internal metadata only (never
+// accepted from a client; never used by R evidence/canonicalization/scores or
+// by S bridge selection/forecasting). AUTOMATIC_HEALTH_RECORD = created by
+// the record-creation path for that record; LEGACY_UNKNOWN = every row that
+// existed before origin persistence (origin not reconstructible — never
+// guessed). NEW S2E-FIX4 — manual Predictions are no longer a CardioSense
+// capability: there is no MANUAL member. No DB default: every new row must be
+// written with an explicit origin by server code.
+enum PredictionOrigin {
+  AUTOMATIC_HEALTH_RECORD
+  LEGACY_UNKNOWN
+}
+
+// NEW S2A — provenance of a HealthRecord's REAL clinical time (S1 §2/§3).
+//   CLINICIAN_ENTERED  measuredAt NOT NULL, captured for every NEW record
+//                      (backend-assigned; never client-selectable)
+//   LEGACY_ENTRY_TIME  measuredAt NULL — row predates explicit clinical time;
+//                      only its entry-time recordedAt exists. Never back-
+//                      filled into measuredAt. Excluded from S cadence
+//                      inference (A2 = L-EXCLUDE-CADENCE).
+// DB invariant (migration CHECK health_records_clinical_time_source_check):
+//   (clinical_time_source = 'CLINICIAN_ENTERED') = (measured_at IS NOT NULL)
+enum ClinicalTimeSource {
+  CLINICIAN_ENTERED
+  LEGACY_ENTRY_TIME
+}
+
+// NEW S2A — longitudinal risk forecasting S (S1 / S1-FIX1 / S1-FIX2,
+// A1 = B typed bridge). Forecasts are SIMULATED projections: never a
+// HealthRecord, never a Prediction, never R evidence / Π, never an Alert.
+// Lifecycle-derived API states (PATIENT_INACTIVE / PATIENT_HIDDEN /
+// PATIENT_LIFECYCLE_INVALID / NOT_EVALUATED) are NOT persisted.
+enum ForecastEligibilityStatus {
+  HISTORY_ABSENT
+  HISTORY_INVALID
+  CLINICAL_HISTORY_INSUFFICIENT
+  FREQUENCY_UNRELIABLE
+  FORECAST_ELIGIBLE
+}
+
+enum ForecastGenerationStatus {
+  NOT_APPLICABLE
+  GENERATED_FULL
+  GENERATED_PARTIAL
+  NONE_ADMISSIBLE
+  FAILED
+}
+
+// GLOBAL = global Skorp only; INDIVIDUALIZED_BRIDGE = a compatible typed
+// RForecastBridgeState was actually applied (never inferred from JSON).
+enum ForecastRiskInterpretation {
+  GLOBAL
+  INDIVIDUALIZED_BRIDGE
+}
+
+enum ForecastTrigger {
+  HEALTH_RECORD_CREATED
+  ANCHOR_PREDICTION_PERSISTED
+  DEMOGRAPHICS_CHANGED
+  PATIENT_REACTIVATED
+  BOOTSTRAP
+}
+
+enum ForecastSupersedeReason {
+  NEW_REAL_RECORD
+  ANCHOR_R_STATE_CHANGED
+  DEMOGRAPHICS_CHANGED
+  PATIENT_LEFT_ACTIVE
+  PATIENT_LIFECYCLE_INVALID
+  MODEL_OR_POLICY_VERSION_CHANGED
+  RETRY_AFTER_FAILURE
+}
+
+// NEW S4 — durable automatic-Prediction obligation (one per accepted
+// HealthRecord). Recoverable dependency failures never terminate a task:
+// they cycle PENDING → PROCESSING → RETRY_WAIT → … → COMPLETED.
+// NEW S4-FIX2 — BLOCKED is terminal. It covers (a) MODEL_INELIGIBLE: the
+// record's clinical age is outside the CURRENT model's range (a historical,
+// business/model-domain outcome: no Prediction, next_attempt_at NULL, never
+// claimed, retried or resurrected by time or a later model release) and
+// (b) genuine data invariants (RECORD_NOT_FOUND, PREDICTION_MISMATCH).
+// Only (b) can be reopened (prediction:reconcile --reopen-blocked, clone/test).
+// WAITING_MODEL_SUPPORT (S4-FIX1) is DEPRECATED and unreachable: kept only as
+// an enum label to avoid enum surgery on clones; a DB CHECK forbids it.
+enum AutomaticPredictionTaskStatus {
+  PENDING
+  PROCESSING
+  RETRY_WAIT
+  WAITING_MODEL_SUPPORT // deprecated (S4-FIX2): never written, forbidden by CHECK
+  COMPLETED
+  BLOCKED
+}
+
+// The ONLY legitimate bridge state. A single-value enum makes "a bridge row
+// is always an INDIVIDUALIZED R outcome" a type-level (and DB enum-level)
+// constraint rather than an application convention.
+enum RForecastBridgeStatus {
+  INDIVIDUALIZED
+}
+
 enum AlertSeverity {
   INFO
   WARNING
@@ -336,6 +448,13 @@ model Paciente {
   predictions   Prediction[]
   alerts        Alert[]
 
+  // NEW S2A — forecast S (separate from REAL clinical/prediction history)
+  riskForecastSets     RiskForecastSet[]
+  riskForecasts        RiskForecast[]
+  forecastBridgeStates RForecastBridgeState[]
+  // NEW S4 — durable automatic-Prediction obligations (one per accepted record)
+  automaticPredictionTasks AutomaticPredictionTask[]
+
   // Z8 — no new index added for isHidden/isActive filtering. The existing
   // @@index([medicoId]) above already makes every Z8 query (the Patients
   // list's ACTIVE/INACTIVE/ALL filter, the hidden-patient management
@@ -367,9 +486,26 @@ model HealthRecord {
   createdBy      String   @map("created_by")
   createdAt      DateTime @default(now()) @map("created_at")
 
+  // NEW S2A — REAL clinical time, distinct from recordedAt (entry instant;
+  // R's frozen time axis) and createdAt (DB insert default).
+  //   measuredAt: UTC clock value, TIMESTAMP(3) WITHOUT TIME ZONE, written
+  //   only through Prisma (session-timezone independent). Raw SQL must read
+  //   it as (measured_at AT TIME ZONE 'UTC'). NULL ⇔ LEGACY_ENTRY_TIME.
+  //   clinicalTimeSource: no @default on purpose — every create must state
+  //   it; the backend assigns CLINICIAN_ENTERED (record.service.ts).
+  measuredAt         DateTime?          @map("measured_at")
+  clinicalTimeSource ClinicalTimeSource @map("clinical_time_source")
+
   patient     Paciente     @relation(fields: [patientId], references: [id])
   creator     User         @relation("CreatedByUser", fields: [createdBy], references: [id])
   predictions Prediction[]
+
+  // NEW S2A — inbound references only (forecast → record). R repositories
+  // never include these relations.
+  anchoredForecastSets RiskForecastSet[]
+  forecastBridgeStates RForecastBridgeState[]
+  // NEW S4 — the durable obligation to produce THIS record's ONE automatic Prediction
+  automaticPredictionTask AutomaticPredictionTask?
 
   @@index([patientId])
   @@index([recordedAt])
@@ -386,13 +522,45 @@ model Prediction {
   isAnomaly      Boolean   @default(false) @map("is_anomaly")
   modelVersion   String?   @map("model_version")
   predictedAt    DateTime  @default(now()) @map("predicted_at")
+  // NEW S2E-FIX3 — see enum PredictionOrigin. No @default on purpose.
+  origin         PredictionOrigin @map("origin")
+
+  // NEW R (R4A) — personalization persistence. All nullable, never
+  // backfilled: every legacy / pre-NEW-R row keeps NULL in all five.
+  //   riskScore (above)        = FUTURE final risk score (individualized or
+  //                              exactly global on fallback)
+  //   globalRiskScore          = FUTURE raw global Skorp score before
+  //                              personalization; the ONLY score the
+  //                              prediction-history channel may ever read
+  //   personalizationStatus    = NEW-R outcome (NULL = legacy row)
+  //   personalizationVersion   = e.g. "R-BPBC-1"
+  //   sexUsed                  = sex actually sent to the model (0|1)
+  //   personalizationProvenance = audit JSON (counts, gamma, gains, bound,
+  //                              fallback reason, evidence fingerprint) —
+  //                              never raw input vectors
+  // DB invariant (migration CHECK predictions_personalization_global_pair_check):
+  //   (personalization_status IS NULL) = (global_risk_score IS NULL)
+  globalRiskScore           Decimal?               @map("global_risk_score") @db.Decimal(5, 4)
+  personalizationStatus     PersonalizationStatus? @map("personalization_status")
+  personalizationVersion    String?                @map("personalization_version")
+  sexUsed                   Int?                   @map("sex_used")
+  personalizationProvenance Json?                  @map("personalization_provenance")
 
   patient       Paciente      @relation(fields: [patientId], references: [id])
   healthRecord  HealthRecord? @relation(fields: [healthRecordId], references: [id])
   alerts        Alert[]
 
+  // NEW S2A — inbound only: the typed bridge row a future S2 block may
+  // capture for THIS REAL NEW-R Prediction (no column added here).
+  forecastBridgeState RForecastBridgeState?
+  // NEW S4 — the durable task this AUTOMATIC Prediction completed (if any)
+  automaticPredictionTask AutomaticPredictionTask?
+
   @@index([patientId])
   @@index([predictedAt])
+  // NEW R (R4A) — prediction-history (Π) lookups by HealthRecord. No
+  // equivalent index existed before (audited: only patient_id/predicted_at).
+  @@index([healthRecordId])
   @@map("predictions")
 }
 
@@ -453,4 +621,173 @@ model Alert {
   @@index([medicoId])
   @@index([isRead])
   @@map("alerts")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NEW S2A — FORECAST S PERSISTENCE (schema only; no producer exists yet)
+// ════════════════════════════════════════════════════════════════════════════
+
+// One row per S evaluation of one patient — exists even when zero forecasts
+// are generated (HISTORY_ABSENT, …, NONE_ADMISSIBLE, FAILED).
+//
+// CURRENT marker: `currentForPatientId` = patientId while this set is the
+// patient's CURRENT set, NULL once superseded. Its @unique gives "at most
+// one CURRENT set per patient" with a Prisma-managed index (PostgreSQL
+// UNIQUE admits many NULLs) — no partial index Prisma could later drift on.
+// Raw-SQL CHECKs (migration plan) tie it to patientId and supersededAt:
+//   risk_forecast_sets_current_marker_check:
+//     current_for_patient_id IS NULL OR current_for_patient_id = patient_id
+//   risk_forecast_sets_current_superseded_check:
+//     (current_for_patient_id IS NULL) = (superseded_at IS NOT NULL)
+model RiskForecastSet {
+  id                  String          @id @default(uuid())
+  patientId           String          @map("patient_id")
+  currentForPatientId String?         @unique @map("current_for_patient_id")
+  trigger             ForecastTrigger
+
+  eligibilityStatus ForecastEligibilityStatus @map("eligibility_status")
+  eligibilityReason String                    @map("eligibility_reason")
+  eligibilityCounts Json                      @map("eligibility_counts")
+  generationStatus  ForecastGenerationStatus  @map("generation_status")
+  generationReason  String?                   @map("generation_reason")
+
+  // REAL anchor / knowledge cutoff (NULL when no usable clinician-timed anchor)
+  anchorHealthRecordId     String?             @map("anchor_health_record_id")
+  knowledgeCutoff          DateTime?           @map("knowledge_cutoff")
+  cutoffLocalDay           DateTime?           @map("cutoff_local_day") @db.Date
+  anchorClinicalTimeSource ClinicalTimeSource? @map("anchor_clinical_time_source")
+
+  // Cadence (S-CAD-1): raw Δ (median of integer local-day gaps → .0 or .5)
+  // and the integer Δd used for target dates.
+  cadenceDaysRaw Decimal? @map("cadence_days_raw") @db.Decimal(6, 2)
+  cadenceDays    Int?     @map("cadence_days")
+  cadenceMethod  String?  @map("cadence_method")
+  cadenceReason  String?  @map("cadence_reason")
+  // NEW S4 — S-CAD-3: the exact 3-interval horizon sequence (days). Unimodal
+  // [d,d,d]; multimodal e.g. [7,21,7]. Empty for pre-S4 sets / abstentions.
+  cadenceIntervalsDays Int[] @default([]) @map("cadence_intervals_days")
+
+  // Scoring semantics. NULL when no forecast was scored. rBridgeStateId is a
+  // COMPUTATIONAL input reference (typed bridge row); rBridgeReason records
+  // why a bridge was not applied (GLOBAL fallback). No descriptive R context.
+  riskInterpretation ForecastRiskInterpretation? @map("risk_interpretation")
+  rBridgeStateId     String?                     @map("r_bridge_state_id")
+  rBridgeReason      String?                     @map("r_bridge_reason")
+
+  sVersion                  String  @map("s_version")
+  featurePolicyVersion      String  @map("feature_policy_version")
+  clinicalTimePolicyVersion String  @map("clinical_time_policy_version")
+  cadencePolicyVersion      String  @map("cadence_policy_version")
+  modelVersion              String? @map("model_version")
+  inputFingerprint          String  @map("input_fingerprint") @db.Char(64)
+
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  supersededAt      DateTime?                @map("superseded_at")
+  supersededBySetId String?                  @unique @map("superseded_by_set_id")
+  supersedeReason   ForecastSupersedeReason? @map("supersede_reason")
+
+  patient      Paciente              @relation(fields: [patientId], references: [id])
+  anchorRecord HealthRecord?         @relation(fields: [anchorHealthRecordId], references: [id])
+  rBridgeState RForecastBridgeState? @relation(fields: [rBridgeStateId], references: [id])
+  supersededBy RiskForecastSet?      @relation("ForecastSetSupersession", fields: [supersededBySetId], references: [id])
+  supersedes   RiskForecastSet?      @relation("ForecastSetSupersession")
+  forecasts    RiskForecast[]
+
+  @@index([patientId, createdAt])
+  @@map("risk_forecast_sets")
+}
+
+// One projected horizon (1..3) of a set. Child of RiskForecastSet only — no
+// relation to HealthRecord or Prediction. Scores use the Prediction score
+// type (Decimal(5,4)); riskLevel reuses RiskLevel.
+// Raw-SQL CHECKs (migration plan): horizon_index BETWEEN 1 AND 3; both scores
+// in [0, 1].
+model RiskForecast {
+  id           String   @id @default(uuid())
+  setId        String   @map("set_id")
+  patientId    String   @map("patient_id")
+  horizonIndex Int      @map("horizon_index") @db.SmallInt
+  targetDate   DateTime @map("target_date") @db.Date
+  targetAge    Int      @map("target_age")
+
+  simulatedState    Json @map("simulated_state")
+  featureProvenance Json @map("feature_provenance")
+  assumptionFlags   Json @map("assumption_flags")
+  // NEW S4 — S-FEAT-SEQUENTIAL-ROBUST-1 per-horizon context provenance
+  // (REAL record count, in-run simulated context, weights, per-feature
+  // rawSlope / trendConsistency / effectiveSlope). NULL for pre-S4 rows.
+  sequentialContext Json? @map("sequential_context")
+
+  globalRiskScore Decimal   @map("global_risk_score") @db.Decimal(5, 4)
+  finalRiskScore  Decimal   @map("final_risk_score") @db.Decimal(5, 4)
+  riskLevel       RiskLevel @map("risk_level")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  set     RiskForecastSet @relation(fields: [setId], references: [id])
+  patient Paciente        @relation(fields: [patientId], references: [id])
+
+  @@unique([setId, horizonIndex])
+  @@index([patientId])
+  @@map("risk_forecasts")
+}
+
+// Typed forecast-only R bridge (A1 = B). At most one per REAL NEW-R
+// Prediction, and only when that Prediction's R outcome was INDIVIDUALIZED.
+// appliedLogit is the typed decisive value returned by the AI in that same
+// REAL prediction call — NEVER parsed from personalizationProvenance JSON,
+// never approximated from rounded scores, never backfilled (existing NEW-R
+// Predictions have no bridge row). No producer exists in S2A.
+// Raw-SQL CHECKs (migration plan): sex_used IN (0,1); applied_logit finite.
+model RForecastBridgeState {
+  id                     String                @id @default(uuid())
+  predictionId           String                @unique @map("prediction_id")
+  healthRecordId         String                @map("health_record_id")
+  patientId              String                @map("patient_id")
+  personalizationVersion String                @map("personalization_version")
+  modelVersion           String                @map("model_version")
+  sexUsed                Int                   @map("sex_used")
+  anchorAge              Int                   @map("anchor_age")
+  status                 RForecastBridgeStatus
+  appliedLogit           Float                 @map("applied_logit")
+  bridgeVersion          String                @map("bridge_version")
+  createdAt              DateTime              @default(now()) @map("created_at")
+
+  prediction   Prediction        @relation(fields: [predictionId], references: [id])
+  healthRecord HealthRecord      @relation(fields: [healthRecordId], references: [id])
+  patient      Paciente          @relation(fields: [patientId], references: [id])
+  forecastSets RiskForecastSet[]
+
+  @@index([patientId])
+  @@index([healthRecordId])
+  @@map("r_forecast_bridge_states")
+}
+
+// NEW S4 — durable automatic-Prediction work item. Created ATOMICALLY with
+// its HealthRecord (same transaction); processed after COMMIT by the
+// automatic-Prediction worker (FOR UPDATE SKIP LOCKED + bounded lease).
+// lastErrorCode is a short sanitized category only (never a stack trace,
+// payload, key or URL).
+model AutomaticPredictionTask {
+  id             String                        @id @default(uuid())
+  healthRecordId String                        @unique @map("health_record_id")
+  patientId      String                        @map("patient_id")
+  status         AutomaticPredictionTaskStatus @default(PENDING)
+  attemptCount   Int                           @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime?                     @default(now()) @map("next_attempt_at") // NULL only for terminal BLOCKED
+  lastAttemptAt  DateTime?                     @map("last_attempt_at")
+  leaseUntil     DateTime?                     @map("lease_until")
+  leaseOwner     String?                       @map("lease_owner")
+  predictionId   String?                       @unique @map("prediction_id")
+  completedAt    DateTime?                     @map("completed_at")
+  lastErrorCode  String?                       @map("last_error_code")
+  createdAt      DateTime                      @default(now()) @map("created_at")
+  updatedAt      DateTime                      @updatedAt @map("updated_at")
+
+  healthRecord HealthRecord @relation(fields: [healthRecordId], references: [id])
+  patient      Paciente     @relation(fields: [patientId], references: [id])
+  prediction   Prediction?  @relation(fields: [predictionId], references: [id])
+
+  @@index([status, nextAttemptAt])
+  @@index([patientId])
+  @@map("automatic_prediction_tasks")
 }
