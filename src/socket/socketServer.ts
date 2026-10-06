@@ -5,6 +5,7 @@ import { assertActiveSession, type ActiveSessionCheck } from '@/lib/session'
 import { logger } from '@/lib/logger'
 import { env } from '@/config/env'
 import { prisma } from '@/config/prisma'
+import { createSubscribePatientHandler } from './subscribePatient.handler'
 
 // Y8D3 — module-level handle to the one Socket.IO server this process ever
 // creates (`setupSocket()` is called exactly once, from index.ts's
@@ -226,7 +227,13 @@ export function setupSocket(httpServer: HTTPServer): IOServer {
     logger.debug(`[Socket] connected: ${socket.id} (user: ${userId}, session: ${sessionId})`)
 
     // Auto-join personal room (unchanged — user-level realtime fanout)
-    void socket.join(`user:${userId}`)
+    void Promise.resolve(socket.join(`user:${userId}`)).catch(error => {
+      logger.warn('[Socket] user-room join failed safely', {
+        socketId: socket.id,
+        event: 'connection',
+        errorType: error instanceof Error ? error.name : typeof error,
+      })
+    })
     // Y8D3 §8 — session-level revocation ownership room, joined in
     // ADDITION to (never replacing) the user room above: the two rooms
     // serve different purposes (user:${userId} = "broadcast to this
@@ -235,7 +242,13 @@ export function setupSocket(httpServer: HTTPServer): IOServer {
     // one refresh cookie — Y8D3 §19 — and is the unit that gets
     // individually revoked"). Every existing room join below (patient:*)
     // is preserved unchanged.
-    void socket.join(`session:${sessionId}`)
+    void Promise.resolve(socket.join(`session:${sessionId}`)).catch(error => {
+      logger.warn('[Socket] session-room join failed safely', {
+        socketId: socket.id,
+        event: 'connection',
+        errorType: error instanceof Error ? error.name : typeof error,
+      })
+    })
 
     // Subscribe to a patient's room
     // Q6 — authorization fix: previously joined ANY patientId with no
@@ -243,31 +256,27 @@ export function setupSocket(httpServer: HTTPServer): IOServer {
     // health_record_created/prediction_completed for a patient belonging
     // to a different médico. Reuses the exact ownership pattern already
     // established in record.service.ts/patient.service.ts/prediction.service.ts
-    // (medico lookup by userId, then patient lookup scoped to that
-    // medico.id) — no new permission model introduced, just applying the
+    // (doctor lookup by userId, then patient lookup scoped to that
+    // doctor.id) — no new permission model introduced, just applying the
     // one already used everywhere else in the codebase to this handler too.
-    socket.on('subscribe_patient', async (patientId: string) => {
-      if (typeof patientId !== 'string') return
-      const medico = await prisma.medico.findUnique({ where: { userId } })
-      if (!medico) {
-        logger.warn(`[Socket] ${userId} rejected — no medico profile for subscribe_patient`)
-        return
-      }
-      const patient = await prisma.paciente.findFirst({
-        where: { id: patientId, medicoId: medico.id },
-      })
-      if (!patient) {
-        logger.warn(`[Socket] ${userId} rejected subscribe_patient:${patientId} — not owned by this medico`)
-        return
-      }
-      void socket.join(`patient:${patientId}`)
-      logger.debug(`[Socket] ${userId} subscribed to patient:${patientId}`)
-    })
+    socket.on('subscribe_patient', createSubscribePatientHandler({
+      socket,
+      userId,
+      dataSource: prisma,
+      logger,
+    }))
 
     // Unsubscribe from a patient's room
     socket.on('unsubscribe_patient', (patientId: string) => {
       if (typeof patientId !== 'string') return
-      void socket.leave(`patient:${patientId}`)
+      void Promise.resolve(socket.leave(`patient:${patientId}`)).catch(error => {
+        logger.warn('[Socket] unsubscribe_patient failed safely', {
+          socketId: socket.id,
+          event: 'unsubscribe_patient',
+          patientId,
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+      })
     })
 
     // Ping/pong keepalive

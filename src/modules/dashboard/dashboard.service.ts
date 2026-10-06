@@ -16,11 +16,11 @@ export interface DashboardStats {
 }
 
 export class DashboardService {
-  // medicoId is derived exclusively from the authenticated JWT's userId —
-  // never accepted from query/body/headers. Same getMedicoOrThrow pattern
+  // doctorId is derived exclusively from the authenticated JWT's userId —
+  // never accepted from query/body/headers. Same getDoctorOrThrow pattern
   // already used identically in patients/health-records/predictions/alerts.
   async getStats(userId: string): Promise<DashboardStats> {
-    const medico = await this.getMedicoOrThrow(userId)
+    const doctor = await this.getDoctorOrThrow(userId)
     const now = new Date()
 
     const todayStart = startOfLocalDay(now)
@@ -33,10 +33,10 @@ export class DashboardService {
     // entered today is not "today"), and a patient's current risk is the
     // Prediction of the EXACT clinically latest record (clinicalLatest.ts,
     // S3-FIX1 strict: none on that record ⇒ the patient is in no risk bucket).
-    const visible = await prisma.paciente.findMany({ where: { medicoId: medico.id, isHidden: false }, select: { id: true } })
+    const visible = await prisma.patient.findMany({ where: { doctorId: doctor.id, isHidden: false }, select: { id: true } })
     const [todayInstants, weekInstants, latestByPatient] = await Promise.all([
-      predictionClinicalInstantsInRange(medico.id, todayStart, todayEnd),
-      predictionClinicalInstantsInRange(medico.id, weekStart, weekEnd),
+      predictionClinicalInstantsInRange(doctor.id, todayStart, todayEnd),
+      predictionClinicalInstantsInRange(doctor.id, weekStart, weekEnd),
       currentPredictionsOfLatestClinicalRecord(visible.map(p => p.id)),
     ])
     const patientsWithRisk = visible.map(p => ({ predictions: latestByPatient.has(p.id) ? [{ riskLevel: latestByPatient.get(p.id)!.riskLevel as string }] : [] }))
@@ -86,16 +86,16 @@ export class DashboardService {
     return { highRiskPatients: high, riskDistribution: { high, moderate, low } }
   }
 
-  private async getMedicoOrThrow(userId: string) {
-    const medico = await prisma.medico.findUnique({ where: { userId } })
-    if (!medico) throw new ForbiddenError('Only doctors can access dashboard stats')
-    return medico
+  private async getDoctorOrThrow(userId: string) {
+    const doctor = await prisma.doctor.findUnique({ where: { userId } })
+    if (!doctor) throw new ForbiddenError('Only doctors can access dashboard stats')
+    return doctor
   }
 
   // O2 — GET /api/dashboard/calendar. AGGREGATED (O1/D-P1-01) across ALL of
   // the médico's patients — no new table, no persisted TimelineEvent/RiskChange.
   async getCalendar(userId: string, from?: Date, to?: Date): Promise<DashboardCalendarEvent[]> {
-    const medico = await this.getMedicoOrThrow(userId)
+    const doctor = await this.getDoctorOrThrow(userId)
 
     // Z2 — Alert-model events removed from the Dashboard calendar (was a
     // 4th parallel query, repo.findAlertsInRange; RISK_CHANGE is unaffected
@@ -106,8 +106,8 @@ export class DashboardService {
     // record's clinical time, LEGACY_UNKNOWN only inside record detail.
     // The builder's order (clinical time → recordedAt → record → type) is kept.
     const [patients, events] = await Promise.all([
-      repo.findPatientIdentities(medico.id),
-      buildClinicalCalendarEvents({ patient: { medicoId: medico.id, isHidden: false } }, from, to),
+      repo.findPatientIdentities(doctor.id),
+      buildClinicalCalendarEvents({ patient: { doctorId: doctor.id, isHidden: false } }, from, to),
     ])
     const patientNameById = new Map(patients.map(p => [p.id, `${p.firstName} ${p.lastName}`]))
     return events.map(event => ({ ...event, patientName: patientNameById.get(event.patientId) ?? 'Paciente' }))

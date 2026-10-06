@@ -59,7 +59,6 @@ export function featureValue(r: SRealRecordInput, f: TrendFeature): number {
     case 'sysBP':     return decimalToNumber(r.sysBP) ?? Number.NaN
     case 'diaBP':     return decimalToNumber(r.diaBP) ?? Number.NaN
     case 'BMI':       return decimalToNumber(r.bmi) ?? Number.NaN
-    case 'heartRate': return r.heartRate
     case 'glucose':   return decimalToNumber(r.glucose) ?? Number.NaN
   }
 }
@@ -74,7 +73,7 @@ export function computeFeatureTrends(visits: ReadonlyArray<{ day: string; record
   return out
 }
 
-// ═══ NEW S4 — S-FEAT-SEQUENTIAL-ROBUST-1: WEIGHTED Theil–Sen ═════════════
+// ═══ NEW S4 — S-FEAT-SEQUENTIAL-ROBUST-2: WEIGHTED Theil–Sen ═════════════
 //
 // Context points carry an effective clinical INSTANT (ms) and an integer
 // weight scaled ×SEQ_WEIGHT_SCALE (REAL 1 → 4, latest REAL 1.25 → 5,

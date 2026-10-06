@@ -43,7 +43,6 @@ export function canonicalFingerprintPayload(input: SPlanInput): string {
     canonicalDecimal(r.sysBP),
     canonicalDecimal(r.diaBP),
     canonicalDecimal(r.bmi),
-    int(r.heartRate, 'heartRate'),
     canonicalDecimal(r.glucose),
   ])
   const bridge = input.bridgeIdentity

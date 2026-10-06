@@ -5,22 +5,57 @@ import { setupSocket } from '@/socket/socketServer'
 import { prisma } from '@/config/prisma'
 import { logger } from '@/lib/logger'
 import { automaticPredictionWorker, isAutomaticPredictionWorkerDisabled } from '@/modules/predictions/automatic/automaticPrediction.worker'
+import { createGracefulShutdown } from '@/runtime/gracefulShutdown'
 
-// Q2-FIX: process-level safety net. Without this, ANY unhandled promise
-// rejection anywhere in the app — not just in the automatic-prediction
-// orchestration added in Q2 — crashes the entire Node process (Node's
-// default `--unhandled-rejections` behavior since v15 is to treat an
-// unhandled rejection as an uncaught exception). The automatic-prediction
-// call site already has its own `.catch()` (record.service.ts), so this is
-// deliberately a last-resort net, not a substitute for handling errors at
-// their source — it only logs and keeps the server alive; it never exits
-// the process, since an isolated background failure (e.g. AI Service down)
-// must never take down the whole API.
+let shutdownController: ReturnType<typeof createGracefulShutdown> | null = null
+let earlyFatalShutdown: Promise<void> | null = null
+
+function requestProcessShutdown(reason: string, exitCode: number, error?: unknown): Promise<void> {
+  if (shutdownController) {
+    return shutdownController.shutdown({ reason, exitCode, error })
+  }
+
+  // A fatal failure before bootstrap has installed the full resource-aware
+  // controller still must not leave an unknown process state running.
+  if (!earlyFatalShutdown) {
+    earlyFatalShutdown = (async () => {
+      logger.error('Fatal process error before graceful shutdown was initialized', {
+        reason,
+        errorName: error instanceof Error ? error.name : undefined,
+        errorMessage: error instanceof Error ? error.message : undefined,
+      })
+      try {
+        await prisma.$disconnect()
+      } catch (disconnectError) {
+        logger.error('Prisma disconnect failed during early fatal shutdown', {
+          errorName: disconnectError instanceof Error ? disconnectError.name : typeof disconnectError,
+        })
+      } finally {
+        process.exit(exitCode)
+      }
+    })()
+  }
+  return earlyFatalShutdown
+}
+
+// INTEGRITY-1B — truly process-level failures are fatal. Expected operational
+// async failures must be caught at their component boundary; reaching either
+// of these handlers means process state is no longer trusted, so perform the
+// one controlled shutdown path and terminate non-zero.
 process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled promise rejection', { reason })
+  logger.error('Unhandled promise rejection — initiating fatal shutdown', {
+    errorName: reason instanceof Error ? reason.name : undefined,
+    errorMessage: reason instanceof Error ? reason.message : undefined,
+  })
+  void requestProcessShutdown('UNHANDLED_REJECTION', 1, reason)
 })
 process.on('uncaughtException', (err) => {
-  logger.error('Uncaught exception', { err })
+  logger.error('Uncaught exception — initiating fatal shutdown', {
+    errorName: err.name,
+    errorMessage: err.message,
+    stack: env.NODE_ENV === 'development' ? err.stack : undefined,
+  })
+  void requestProcessShutdown('UNCAUGHT_EXCEPTION', 1, err)
 })
 
 async function bootstrap() {
@@ -30,7 +65,8 @@ async function bootstrap() {
     logger.info('✅ PostgreSQL connected')
   } catch (err) {
     logger.error('❌ PostgreSQL connection failed', { err })
-    process.exit(1)
+    await requestProcessShutdown('BOOTSTRAP_DB_CONNECTION_FAILED', 1, err)
+    return
   }
 
   // Create HTTP server
@@ -49,6 +85,23 @@ async function bootstrap() {
   // periodic polling. Independent of any frontend connection.
   if (!isAutomaticPredictionWorkerDisabled()) automaticPredictionWorker.start(io)
 
+  // Socket.IO is attached directly to this HTTP server and therefore owns
+  // transport shutdown. io.close() closes Socket.IO/Engine.IO and the
+  // underlying HTTP server, so there must be no independent httpServer.close()
+  // request in the same graceful-shutdown sequence.
+  const closeTransport = () => new Promise<void>((resolve) => {
+    io.close(() => resolve())
+  })
+
+  shutdownController = createGracefulShutdown({
+    closeTransport,
+    stopBackgroundWork: () => automaticPredictionWorker.stop(),
+    disconnectPrisma: () => prisma.$disconnect(),
+    exit: code => process.exit(code),
+    logger,
+    timeoutMs: 10_000,
+  })
+
   // Start listening
   const port = parseInt(env.PORT, 10)
   httpServer.listen(port, () => {
@@ -57,23 +110,17 @@ async function bootstrap() {
     logger.info(`   API:    http://localhost:${port}/api`)
   })
 
-  // Graceful shutdown
-  const shutdown = async (signal: string) => {
-    logger.info(`${signal} received — shutting down...`)
-    await automaticPredictionWorker.stop()     // NEW S4 — no new ticks; await the pass in flight
-    await prisma.$disconnect()
-    httpServer.close(() => {
-      logger.info('Server closed')
-      process.exit(0)
-    })
-    setTimeout(() => process.exit(1), 10_000)
-  }
-
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
-  process.on('SIGINT',  () => shutdown('SIGINT'))
+  // All normal/fatal shutdown requests converge on the same idempotent
+  // Promise. A fatal request arriving during a signal shutdown upgrades the
+  // eventual exit code to non-zero but never starts cleanup a second time.
+  process.on('SIGTERM', () => { void requestProcessShutdown('SIGTERM', 0) })
+  process.on('SIGINT',  () => { void requestProcessShutdown('SIGINT', 0) })
 }
 
 bootstrap().catch(err => {
-  logger.error('Bootstrap failed', { err })
-  process.exit(1)
+  logger.error('Bootstrap failed', {
+    errorName: err instanceof Error ? err.name : typeof err,
+    errorMessage: err instanceof Error ? err.message : undefined,
+  })
+  void requestProcessShutdown('BOOTSTRAP_FAILED', 1, err)
 })

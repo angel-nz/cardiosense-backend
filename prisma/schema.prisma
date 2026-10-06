@@ -11,8 +11,8 @@ datasource db {
 
 enum Role {
   ADMIN
-  MEDICO
-  PACIENTE
+  DOCTOR
+  PATIENT
 }
 
 enum RiskLevel {
@@ -154,7 +154,7 @@ enum AlertSeverity {
 // for every value below).
 //
 // Z6-R2 §1/§2/§6/§7 — `INFO_DOCTOR_PROFILE_UPDATED` REMOVED. Editing a
-// doctor's own profile (name, cédula, especialidad, hospital, phone) is a
+// doctor's own profile (name, cédula, specialty, hospital, phone) is a
 // withdrawn product decision for a persisted information Alert — it no
 // longer creates one at all, and no replacement value is added. A forward
 // migration (20260930223000_remove_doctor_profile_info_alert) deletes any
@@ -205,20 +205,20 @@ model User {
   // "no email" never conflicts with another "no email" account. Every
   // existing account keeps its real, non-null email unchanged. The
   // product invariant this supports (every MEDICO has email != null OR
-  // medico.phone != null) is enforced in application code (auth.dto.ts's
+  // doctor.phone != null) is enforced in application code (auth.dto.ts's
   // RegisterDto superRefine + user.routes.ts's PATCH /me/profile lockout
-  // check below), never as a DB CHECK spanning User + Medico.
+  // check below), never as a DB CHECK spanning User + Doctor.
   email        String?  @unique
   passwordHash String   @map("password_hash")
   firstName    String   @map("first_name")
   lastName     String   @map("last_name")
-  role         Role     @default(MEDICO)
+  role         Role     @default(DOCTOR)
   isActive     Boolean  @default(true) @map("is_active")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
   // Relations
-  medico          Medico?
+  doctor          Doctor?
   healthRecords   HealthRecord[]   @relation("CreatedByUser")
   refreshTokens   RefreshToken[]
   notificationPreference NotificationPreference?
@@ -361,23 +361,23 @@ model AvatarImage {
   @@map("avatar_images")
 }
 
-model Medico {
+model Doctor {
   id                 String   @id @default(uuid())
   userId             String   @unique @map("user_id")
-  cedulaProfesional  String?  @unique @map("cedula_profesional")
-  especialidad       String?
+  professionalLicense String?  @unique @map("professional_license")
+  specialty           String?
   hospital           String?
   // Z6 — optional doctor contact phone, professional/personal profile
-  // information belonging to Medico (not User — User.email is the
+  // information belonging to Doctor (not User — User.email is the
   // login/auth identity, a completely separate concern). Nullable, no
-  // unique constraint, no default/backfill: every existing Medico row
+  // unique constraint, no default/backfill: every existing Doctor row
   // simply gets `phone = NULL`. Persisted form is E.164 (see
-  // lib/phone.ts::isCanonicalPhone, the exact same contract Paciente.phone
+  // lib/phone.ts::isCanonicalPhone, the exact same contract Patient.phone
   // already uses) — enforced at the DTO layer (user.routes.ts's
   // UpdateMyProfileDto), not here.
   //
   // Z6-R1 — now also a LOGIN IDENTIFIER (a doctor may authenticate by
-  // phone, see auth.service.ts), so it must resolve to at most one Medico:
+  // phone, see auth.service.ts), so it must resolve to at most one Doctor:
   // `@unique`. Still nullable — a doctor may register/operate with email
   // only and no phone at all. Not made globally required; the "at least
   // one of email/phone" invariant lives in application code, not here.
@@ -385,7 +385,7 @@ model Medico {
   createdAt          DateTime @default(now()) @map("created_at")
 
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  pacientes Paciente[]
+  patients Patient[]
   // Z5 — direct doctor-scoped Alert ownership, for an Alert that has no
   // legitimate patient to attach to. See Alert model below for the full
   // ownership design. Z6-R2 — the one event that ever populated this path
@@ -396,12 +396,12 @@ model Medico {
   // — no live AlertType value creates a doctor-scoped Alert today.
   alerts    Alert[]
 
-  @@map("medicos")
+  @@map("doctors")
 }
 
-model Paciente {
+model Patient {
   id        String   @id @default(uuid())
-  medicoId  String   @map("medico_id")
+  doctorId  String   @map("doctor_id")
   firstName String   @map("first_name")
   lastName  String   @map("last_name")
   birthDate DateTime @map("birth_date") @db.Date
@@ -411,7 +411,7 @@ model Paciente {
   // Z6 — optional patient contact email. CONTACT INFORMATION only — this
   // patient is not a User account and this has no relationship to
   // login/auth (User.email, unique/required there). Nullable, no unique
-  // constraint, no default/backfill: every existing Paciente row simply
+  // constraint, no default/backfill: every existing Patient row simply
   // gets `email = NULL`. Normalized (trim + lowercase) at the DTO layer
   // (patient.dto.ts) before it ever reaches Prisma.
   email     String?
@@ -443,7 +443,7 @@ model Paciente {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  medico        Medico         @relation(fields: [medicoId], references: [id])
+  doctor        Doctor         @relation(fields: [doctorId], references: [id])
   healthRecords HealthRecord[]
   predictions   Prediction[]
   alerts        Alert[]
@@ -456,15 +456,15 @@ model Paciente {
   automaticPredictionTasks AutomaticPredictionTask[]
 
   // Z8 — no new index added for isHidden/isActive filtering. The existing
-  // @@index([medicoId]) above already makes every Z8 query (the Patients
+  // @@index([doctorId]) above already makes every Z8 query (the Patients
   // list's ACTIVE/INACTIVE/ALL filter, the hidden-patient management
-  // surface) an index-backed scan on medicoId with isActive/isHidden as
+  // surface) an index-backed scan on doctorId with isActive/isHidden as
   // residual in-memory predicates — this project's current scale (patients
   // per doctor) gives no concrete, observed reason to add a speculative
   // composite index on top of that, per this block's own instruction not to
   // add one without one.
-  @@index([medicoId])
-  @@map("pacientes")
+  @@index([doctorId])
+  @@map("patients")
 }
 
 model HealthRecord {
@@ -480,14 +480,14 @@ model HealthRecord {
   sysBP          Decimal  @map("sys_bp") @db.Decimal(5, 2)
   diaBP          Decimal  @map("dia_bp") @db.Decimal(5, 2)
   bmi            Decimal  @db.Decimal(5, 2)
-  heartRate      Int      @map("heart_rate")
   glucose        Decimal  @db.Decimal(6, 2)
   notes          String?
   createdBy      String   @map("created_by")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  // NEW S2A — REAL clinical time, distinct from recordedAt (entry instant;
-  // R's frozen time axis) and createdAt (DB insert default).
+  // NEW S2A / PRE-T-R1 — REAL clinical time, distinct from recordedAt
+  // (technical entry/audit instant) and createdAt (DB insert default). R-BPBC-3
+  // uses measuredAt as its causal clock and never falls back to recordedAt.
   //   measuredAt: UTC clock value, TIMESTAMP(3) WITHOUT TIME ZONE, written
   //   only through Prisma (session-timezone independent). Raw SQL must read
   //   it as (measured_at AT TIME ZONE 'UTC'). NULL ⇔ LEGACY_ENTRY_TIME.
@@ -496,7 +496,7 @@ model HealthRecord {
   measuredAt         DateTime?          @map("measured_at")
   clinicalTimeSource ClinicalTimeSource @map("clinical_time_source")
 
-  patient     Paciente     @relation(fields: [patientId], references: [id])
+  patient     Patient     @relation(fields: [patientId], references: [id])
   creator     User         @relation("CreatedByUser", fields: [createdBy], references: [id])
   predictions Prediction[]
 
@@ -533,7 +533,7 @@ model Prediction {
   //                              personalization; the ONLY score the
   //                              prediction-history channel may ever read
   //   personalizationStatus    = NEW-R outcome (NULL = legacy row)
-  //   personalizationVersion   = e.g. "R-BPBC-1"
+  //   personalizationVersion   = e.g. "R-BPBC-3" (historical rows may remain R-BPBC-2)
   //   sexUsed                  = sex actually sent to the model (0|1)
   //   personalizationProvenance = audit JSON (counts, gamma, gains, bound,
   //                              fallback reason, evidence fingerprint) —
@@ -546,7 +546,7 @@ model Prediction {
   sexUsed                   Int?                   @map("sex_used")
   personalizationProvenance Json?                  @map("personalization_provenance")
 
-  patient       Paciente      @relation(fields: [patientId], references: [id])
+  patient       Patient      @relation(fields: [patientId], references: [id])
   healthRecord  HealthRecord? @relation(fields: [healthRecordId], references: [id])
   alerts        Alert[]
 
@@ -569,14 +569,14 @@ model Prediction {
 // NOT NULL). One of the Z5 events — INFO_DOCTOR_PROFILE_UPDATED, since
 // removed by Z6-R2 — had no legitimate patient at all (it was about the
 // doctor's own profile), so `patientId` became nullable and a second,
-// independent ownership path was added: `medicoId`, direct doctor
+// independent ownership path was added: `doctorId`, direct doctor
 // ownership, for exactly that case. This is NOT a redesign of
 // patient-scoped Alerts — every prediction-generated and
 // INFO_PATIENT_*/INFO_HEALTH_RECORD_CREATED Alert continues to set
-// patientId exactly as before, with medicoId left null.
+// patientId exactly as before, with doctorId left null.
 //
 // Z6-R2 — no current AlertType value ever populates the doctor-scoped
-// path anymore (its one producer was removed), but `medicoId` and the
+// path anymore (its one producer was removed), but `doctorId` and the
 // ownership mechanism below are kept as generic infrastructure for any
 // future doctor-scoped Alert, not removed merely because their one past
 // user was withdrawn.
@@ -586,12 +586,12 @@ model Prediction {
 // none is introduced here — see PRISMA GATE P2 precedent of minimal,
 // focused changes): every Alert must have exactly one ownership path
 // populated —
-//   PATIENT-SCOPED:  patientId != null, medicoId == null
-//   DOCTOR-SCOPED:   patientId == null, medicoId != null
+//   PATIENT-SCOPED:  patientId != null, doctorId == null
+//   DOCTOR-SCOPED:   patientId == null, doctorId != null
 // — never both null. AlertRepository's doctor-visibility queries
-// (findByMedico/findById/markRead/markAllRead) read EITHER path: an Alert
-// belongs to the current doctor when `patient.medicoId == currentMedicoId`
-// OR `alert.medicoId == currentMedicoId`, never broader.
+// (findByDoctor/findById/markRead/markAllRead) read EITHER path: an Alert
+// belongs to the current doctor when `patient.doctorId == currentDoctorId`
+// OR `alert.doctorId == currentDoctorId`, never broader.
 model Alert {
   id           String        @id @default(uuid())
   patientId    String?       @map("patient_id")
@@ -600,7 +600,7 @@ model Alert {
   // anymore, but the column/mechanism is preserved as generic
   // infrastructure (see model comment above). Left null for every
   // patient-scoped Alert, as always.
-  medicoId     String?       @map("medico_id")
+  doctorId     String?       @map("doctor_id")
   predictionId String?       @map("prediction_id")
   // Z5 — nullable: NULL for every pre-Z5 row and for every prediction-
   // generated HIGH/MODERATE/ANOMALY Alert going forward (that branch
@@ -613,12 +613,12 @@ model Alert {
   isRead       Boolean       @default(false) @map("is_read")
   createdAt    DateTime      @default(now()) @map("created_at")
 
-  patient    Paciente?   @relation(fields: [patientId], references: [id])
-  medico     Medico?     @relation(fields: [medicoId], references: [id])
+  patient    Patient?    @relation(fields: [patientId], references: [id])
+  doctor     Doctor?     @relation(fields: [doctorId], references: [id])
   prediction Prediction? @relation(fields: [predictionId], references: [id])
 
   @@index([patientId])
-  @@index([medicoId])
+  @@index([doctorId])
   @@index([isRead])
   @@map("alerts")
 }
@@ -686,7 +686,7 @@ model RiskForecastSet {
   supersededBySetId String?                  @unique @map("superseded_by_set_id")
   supersedeReason   ForecastSupersedeReason? @map("supersede_reason")
 
-  patient      Paciente              @relation(fields: [patientId], references: [id])
+  patient      Patient              @relation(fields: [patientId], references: [id])
   anchorRecord HealthRecord?         @relation(fields: [anchorHealthRecordId], references: [id])
   rBridgeState RForecastBridgeState? @relation(fields: [rBridgeStateId], references: [id])
   supersededBy RiskForecastSet?      @relation("ForecastSetSupersession", fields: [supersededBySetId], references: [id])
@@ -713,7 +713,7 @@ model RiskForecast {
   simulatedState    Json @map("simulated_state")
   featureProvenance Json @map("feature_provenance")
   assumptionFlags   Json @map("assumption_flags")
-  // NEW S4 — S-FEAT-SEQUENTIAL-ROBUST-1 per-horizon context provenance
+  // NEW S4 — S-FEAT-SEQUENTIAL-ROBUST-2 per-horizon context provenance
   // (REAL record count, in-run simulated context, weights, per-feature
   // rawSlope / trendConsistency / effectiveSlope). NULL for pre-S4 rows.
   sequentialContext Json? @map("sequential_context")
@@ -724,7 +724,7 @@ model RiskForecast {
   createdAt       DateTime  @default(now()) @map("created_at")
 
   set     RiskForecastSet @relation(fields: [setId], references: [id])
-  patient Paciente        @relation(fields: [patientId], references: [id])
+  patient Patient        @relation(fields: [patientId], references: [id])
 
   @@unique([setId, horizonIndex])
   @@index([patientId])
@@ -754,7 +754,7 @@ model RForecastBridgeState {
 
   prediction   Prediction        @relation(fields: [predictionId], references: [id])
   healthRecord HealthRecord      @relation(fields: [healthRecordId], references: [id])
-  patient      Paciente          @relation(fields: [patientId], references: [id])
+  patient      Patient          @relation(fields: [patientId], references: [id])
   forecastSets RiskForecastSet[]
 
   @@index([patientId])
@@ -784,7 +784,7 @@ model AutomaticPredictionTask {
   updatedAt      DateTime                      @updatedAt @map("updated_at")
 
   healthRecord HealthRecord @relation(fields: [healthRecordId], references: [id])
-  patient      Paciente     @relation(fields: [patientId], references: [id])
+  patient      Patient     @relation(fields: [patientId], references: [id])
   prediction   Prediction?  @relation(fields: [predictionId], references: [id])
 
   @@index([status, nextAttemptAt])

@@ -125,7 +125,7 @@ export class HealthRecordService {
     await alertSvc.createInformationAlert({
       type:         'INFO_HEALTH_RECORD_CREATED',
       patientId:    record.patientId,
-      medicoUserId: userId,
+      doctorUserId: userId,
       patientName:  `${patient.firstName} ${patient.lastName}`,
       message:      'Se registró un nuevo registro clínico.',
     })
@@ -192,11 +192,11 @@ export class HealthRecordService {
   // which must keep working for it); the isActive gate lives only in
   // create() above, which is the one write path this module has.
   private async assertPatientOwnership(userId: string, patientId: string) {
-    const medico = await prisma.medico.findUnique({ where: { userId } })
-    if (!medico) throw new ForbiddenError('Only doctors can access health records')
+    const doctor = await prisma.doctor.findUnique({ where: { userId } })
+    if (!doctor) throw new ForbiddenError('Only doctors can access health records')
 
-    const patient = await prisma.paciente.findFirst({
-      where: { id: patientId, medicoId: medico.id, isHidden: false },
+    const patient = await prisma.patient.findFirst({
+      where: { id: patientId, doctorId: doctor.id, isHidden: false },
     })
     if (!patient) throw new NotFoundError('Patient')
     return patient

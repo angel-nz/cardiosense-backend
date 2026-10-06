@@ -37,6 +37,7 @@ import { revokeSession, revokeOtherSessions, clearRefreshCookie } from '@/lib/se
 import { disconnectSessionSockets, disconnectOtherSessionSockets } from '@/socket/socketServer'
 import { normalizeAvatarUpload } from '@/modules/users/avatar.pipeline'
 import type { AuthRequest } from '@/types'
+import { toPublicDoctorProfile, toPublicRole } from '@/lib/publicIdentity'
 
 const router = Router()
 const auth   = authenticate
@@ -51,11 +52,16 @@ router.get('/',
         select: {
           id: true, email: true, firstName: true, lastName: true,
           role: true, isActive: true, createdAt: true,
-          medico: { select: { especialidad: true, hospital: true } },
+          doctor: { select: { specialty: true, hospital: true } },
         },
         orderBy: { createdAt: 'desc' },
       })
-      res.json(users)
+      res.json(users.map(user => ({
+        ...user,
+        role: toPublicRole(user.role),
+        medico: user.doctor ? { especialidad: user.doctor.specialty, hospital: user.doctor.hospital } : null,
+        doctor: undefined,
+      })))
     } catch (err) { next(err) }
   },
 )
@@ -328,7 +334,7 @@ router.get('/me/profile',
           // Z6 — doctor phone added to this same select; returned as `null`
           // for a doctor with none, same nullable convention as the three
           // existing professional fields.
-          medico: { select: { id: true, cedulaProfesional: true, especialidad: true, hospital: true, phone: true } },
+          doctor: { select: { id: true, professionalLicense: true, specialty: true, hospital: true, phone: true } },
           // Y3.1B §19 — metadata ONLY, never `data` (the bytes). This is
           // the one field the avatar retrieval flow needs to know WHEN to
           // (re)fetch the actual image; the image itself only ever comes
@@ -344,12 +350,12 @@ router.get('/me/profile',
       // "nothing filled in yet" state — surfaced explicitly rather than
       // silently answered with fabricated empty professional fields. A
       // non-MEDICO (e.g. ADMIN) genuinely has no Medico row by design, so
-      // `medico` is simply null for them, not an error.
-      if (user.role === 'MEDICO' && !user.medico) {
+      // `doctor` is simply null for them, not an error.
+      if (user.role === 'DOCTOR' && !user.doctor) {
         throw new NotFoundError('Medico')
       }
 
-      // `medico` nested the same way login/register/PATCH /:id already
+      // `doctor` nested the same way login/register/PATCH /:id already
       // shape it — one consistent User wire-shape regardless of source
       // endpoint (Y3 §14), so the same frontend normalizer works for all
       // of them.
@@ -358,8 +364,8 @@ router.get('/me/profile',
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        role: user.role,
-        medico: user.medico ?? null,
+        role: toPublicRole(user.role),
+        medico: toPublicDoctorProfile(user.doctor) ?? null,
         // Y3.1B §19 — the one frozen avatar shape: `{updatedAt}` or `null`.
         avatar: user.avatarImage ? { updatedAt: user.avatarImage.updatedAt } : null,
       })
@@ -439,9 +445,9 @@ router.patch('/me/profile',
       const normalize = (v: string | null | undefined) =>
         v === undefined ? undefined : (v === null || v === '' ? null : v)
 
-      const medicoData: Record<string, string | null> = {
-        ...(cedulaProfesional !== undefined && { cedulaProfesional: normalize(cedulaProfesional) }),
-        ...(especialidad      !== undefined && { especialidad:      normalize(especialidad) }),
+      const doctorData: Record<string, string | null> = {
+        ...(cedulaProfesional !== undefined && { professionalLicense: normalize(cedulaProfesional) }),
+        ...(especialidad      !== undefined && { specialty:           normalize(especialidad) }),
         ...(hospital          !== undefined && { hospital:          normalize(hospital) }),
         // Z6-FIX1 — `phone` already arrives as either a valid canonical
         // E.164 string or `null` (NullableCanonicalPhoneField's own
@@ -451,15 +457,15 @@ router.patch('/me/profile',
         ...(phone             !== undefined && { phone }),
       }
 
-      // PRE-R — this select now also fetches `medico.phone`: the final-
+      // PRE-R — this select now also fetches `doctor.phone`: the final-
       // state identity invariant below needs the CURRENT, authoritative
       // phone value (for a PATCH that doesn't touch `phone` at all) exactly
       // as it already needed the current `email` for the same reason.
       // `role` is still "is this even a MEDICO" (a non-MEDICO has no
-      // `medico` relation, hence no phone, ever).
+      // `doctor` relation, hence no phone, ever).
       const current = await prisma.user.findUnique({
         where: { id: userId },
-        select: { role: true, email: true, medico: { select: { phone: true } } },
+        select: { role: true, email: true, doctor: { select: { phone: true } } },
       })
       if (!current) throw new NotFoundError('User')
 
@@ -484,8 +490,8 @@ router.patch('/me/profile',
       const prospectiveEmail: string | null =
         email !== undefined ? (email as string | null) : current.email
       const prospectivePhone: string | null =
-        current.role === 'MEDICO'
-          ? (phone !== undefined ? (phone as string | null) : (current.medico?.phone ?? null))
+        current.role === 'DOCTOR'
+          ? (phone !== undefined ? (phone as string | null) : (current.doctor?.phone ?? null))
           : null
 
       // Rejected BEFORE any write — no partial mutation, no doctor-profile
@@ -507,13 +513,13 @@ router.patch('/me/profile',
             ...(firstName !== undefined && { firstName }),
             ...(lastName  !== undefined && { lastName }),
             ...(email     !== undefined && { email }),
-            ...(current.role === 'MEDICO' && Object.keys(medicoData).length > 0 && {
-              medico: { update: medicoData },
+            ...(current.role === 'DOCTOR' && Object.keys(doctorData).length > 0 && {
+              doctor: { update: doctorData },
             }),
           },
           select: {
             id: true, email: true, firstName: true, lastName: true, role: true, updatedAt: true,
-            medico: { select: { id: true, cedulaProfesional: true, especialidad: true, hospital: true, phone: true } },
+            doctor: { select: { id: true, professionalLicense: true, specialty: true, hospital: true, phone: true } },
             // Y3.1B §19 — same metadata-only inclusion as GET /me/profile
             // above; this PATCH never touches the avatar itself (avatar
             // lifecycle is fully independent — Y3.1B §32), it only needs to
@@ -537,9 +543,9 @@ router.patch('/me/profile',
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        role: user.role,
+        role: toPublicRole(user.role),
         updatedAt: user.updatedAt,
-        medico: user.medico ?? null,
+        medico: toPublicDoctorProfile(user.doctor) ?? null,
         avatar: user.avatarImage ? { updatedAt: user.avatarImage.updatedAt } : null,
       })
     } catch (err) {
@@ -580,7 +586,7 @@ router.patch('/me/profile',
 // Scoped to `me`, same rationale as every other /me/* route in this file: a
 // user's own avatar is inherently theirs to upload/view/remove — `me`
 // removes any IDOR surface structurally, identity comes ONLY from
-// req.user.sub, never from a body/query/path userId/doctorId/medicoId
+// req.user.sub, never from a body/query/path userId/doctorId/doctorId
 // (Y3.1B §8). No admin avatar endpoints exist in this block.
 //
 // Retrieval is deliberately PRIVATE, never a public/cacheable URL
@@ -947,11 +953,16 @@ router.get('/:id',
         select: {
           id: true, email: true, firstName: true, lastName: true,
           role: true, isActive: true, createdAt: true,
-          medico: true,
+          doctor: true,
         },
       })
       if (!user) throw new NotFoundError('User')
-      res.json(user)
+      res.json({
+        ...user,
+        role: toPublicRole(user.role),
+        medico: toPublicDoctorProfile(user.doctor) ?? null,
+        doctor: undefined,
+      })
     } catch (err) { next(err) }
   }),
 )
@@ -983,9 +994,9 @@ router.patch('/:id',
           ...(firstName && { firstName }),
           ...(lastName  && { lastName }),
           ...(req.user.role === 'MEDICO' && (especialidad || hospital) && {
-            medico: {
+            doctor: {
               update: {
-                ...(especialidad && { especialidad }),
+                ...(especialidad && { specialty: especialidad }),
                 ...(hospital     && { hospital }),
               },
             },
@@ -993,10 +1004,15 @@ router.patch('/:id',
         },
         select: {
           id: true, email: true, firstName: true, lastName: true,
-          role: true, updatedAt: true, medico: true,
+          role: true, updatedAt: true, doctor: true,
         },
       })
-      res.json(user)
+      res.json({
+        ...user,
+        role: toPublicRole(user.role),
+        medico: toPublicDoctorProfile(user.doctor) ?? null,
+        doctor: undefined,
+      })
     } catch (err) { next(err) }
   }),
 )

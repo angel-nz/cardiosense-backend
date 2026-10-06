@@ -6,7 +6,7 @@
 import type { Server as IOServer } from 'socket.io'
 import type { ForecastTrigger } from '@prisma/client'
 import { logger } from '@/lib/logger'
-import { orchestrateForecast, reconcileLifecycleForMedico, reconcileLifecycleForPatients } from './forecast.orchestrator'
+import { orchestrateForecast, reconcileLifecycleForDoctor, reconcileLifecycleForPatients } from './forecast.orchestrator'
 
 const inFlight = new Set<Promise<unknown>>()
 
@@ -37,8 +37,8 @@ export function scheduleForecastOrchestration(patientId: string, trigger: Foreca
   void runForecastOrchestration(patientId, trigger, io)
 }
 
-export function scheduleLifecycleReconcile(target: { patientIds?: string[]; medicoId?: string }, io?: IOServer): void {
-  const run = target.medicoId ? reconcileLifecycleForMedico(target.medicoId, io) : reconcileLifecycleForPatients(target.patientIds ?? [], io)
+export function scheduleLifecycleReconcile(target: { patientIds?: string[]; doctorId?: string }, io?: IOServer): void {
+  const run = target.doctorId ? reconcileLifecycleForDoctor(target.doctorId, io) : reconcileLifecycleForPatients(target.patientIds ?? [], io)
   track(run.catch(err => {
     logger.error('Forecast lifecycle reconcile failed (source operation unaffected)', { ...describe(err) })
   }))

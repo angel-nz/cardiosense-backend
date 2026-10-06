@@ -17,7 +17,7 @@ export interface PredictionAlertData {
   predictionId:     string
   severity:         string
   message:          string
-  medicoUserId:     string
+  doctorUserId:     string
   patientName:      string
   riskScore:        number
   realtimeCategory: RealtimeAlertCategory
@@ -72,13 +72,13 @@ export class AlertService {
     // same Y4-FIX1 pattern: a synchronous emit failure here must not affect
     // the already-persisted Alert or reject this call.
     try {
-      this.io?.to(`user:${data.medicoUserId}`).emit('alerts_changed', {
+      this.io?.to(`user:${data.doctorUserId}`).emit('alerts_changed', {
         alertId:   alert.id,
         patientId: data.patientId,
       })
     } catch (err) {
       logger.warn('alerts_changed emit failed — Alert already persisted, invalidation signal skipped', {
-        medicoUserId: data.medicoUserId,
+        doctorUserId: data.doctorUserId,
         alertId:      alert.id,
         err:          err instanceof Error ? err.message : String(err),
       })
@@ -88,7 +88,7 @@ export class AlertService {
     // `new_alert` emit below. isRealtimeNotificationEnabled() already
     // catches its own failures and defaults to enabled — nothing here can
     // make a preference-read failure affect the Alert that already exists.
-    const realtimeEnabled = await isRealtimeNotificationEnabled(data.medicoUserId, data.realtimeCategory)
+    const realtimeEnabled = await isRealtimeNotificationEnabled(data.doctorUserId, data.realtimeCategory)
     if (realtimeEnabled) {
       // Y4-FIX1 — `new_alert` is optional presentation/delivery, never
       // clinical/provenance data (Y4-FIX1 §1). An unexpected synchronous
@@ -98,7 +98,7 @@ export class AlertService {
       // already safely persisted above. Narrow: wraps ONLY this emit, not
       // dashboard_activity_changed below or the persisted Alert's return.
       try {
-        this.io?.to(`user:${data.medicoUserId}`).emit('new_alert', {
+        this.io?.to(`user:${data.doctorUserId}`).emit('new_alert', {
           id:          alert.id,
           patientId:   data.patientId,
           patientName: data.patientName,
@@ -114,7 +114,7 @@ export class AlertService {
         // secrets, or patient PII (patientName/message are deliberately
         // excluded from this log line).
         logger.warn('new_alert emit failed — Alert already persisted, delivery skipped', {
-          medicoUserId: data.medicoUserId,
+          doctorUserId: data.doctorUserId,
           alertId:      alert.id,
           category:     data.realtimeCategory,
           err:          err instanceof Error ? err.message : String(err),
@@ -122,7 +122,7 @@ export class AlertService {
       }
     } else {
       logger.info('new_alert suppressed by user notification preference', {
-        medicoUserId: data.medicoUserId,
+        doctorUserId: data.doctorUserId,
         alertId:      alert.id,
         category:     data.realtimeCategory,
       })
@@ -138,7 +138,7 @@ export class AlertService {
     // dashboard_activity_changed prediction.service.ts already emits for
     // this same predictFromHealthRecord() call — unchanged, pre-existing, accepted-by-design
     // duplication (O4.1), not something Y4 introduces or removes.
-    this.io?.to(`user:${data.medicoUserId}`).emit('dashboard_activity_changed', {
+    this.io?.to(`user:${data.doctorUserId}`).emit('dashboard_activity_changed', {
       patientId: data.patientId,
       eventDate: alert.createdAt,
     })
@@ -157,8 +157,8 @@ export class AlertService {
   // entirely — see that route's own comments.)
   //
   // Ownership (schema.prisma Alert model comment has the full invariant):
-  // exactly one of patientId/medicoId must be set — patientId for every
-  // current patient-scoped event; medicoId (the Medico.id PK, NOT the
+  // exactly one of patientId/doctorId must be set — patientId for every
+  // current patient-scoped event; doctorId (the Medico.id PK, NOT the
   // User.id) is the doctor-scoped path, which no live caller populates
   // today (its one producer, the doctor-profile information alert, was
   // removed by Z6-R2) but remains supported here as generic infrastructure, not
@@ -166,13 +166,13 @@ export class AlertService {
   // alone, because a silently-both-null Alert would violate the invariant
   // with no DB-level guard to catch it (no CHECK constraint — see schema
   // comment).
-  // `medicoUserId` (User.id) is ALWAYS required regardless of scope — it
-  // is what the realtime room (`user:${medicoUserId}`) and the
+  // `doctorUserId` (User.id) is ALWAYS required regardless of scope — it
+  // is what the realtime room (`user:${doctorUserId}`) and the
   // NotificationPreference lookup are keyed on, and it is never the same
-  // id as `medicoId` (Medico.id), so it cannot be derived from it without
+  // id as `doctorId` (Medico.id), so it cannot be derived from it without
   // an extra query — every caller already has it in hand (the
   // authenticated request's own userId) and passes it explicitly, exactly
-  // like create() above already requires medicoUserId from its caller.
+  // like create() above already requires doctorUserId from its caller.
   // Z5-FIX1 — this method is AUXILIARY/SECONDARY notification
   // infrastructure: by the time any of its four callers
   // (patient.service.ts::create/update, record.service.ts::create,
@@ -199,8 +199,8 @@ export class AlertService {
   // that already saved.
   //
   // Fix: this method now never throws. Every failure path is caught here,
-  // logged with enough context to diagnose (type, patientId/medicoId,
-  // medicoUserId, the original error — never the clinical message text),
+  // logged with enough context to diagnose (type, patientId/doctorId,
+  // doctorUserId, the original error — never the clinical message text),
   // and swallowed — the primary mutation's own success is never
   // retroactively falsified. This isolation is scoped to THIS method
   // alone: AlertService.create() (the pre-existing, prediction-generated
@@ -215,8 +215,8 @@ export class AlertService {
   async createInformationAlert(data: {
     type:         AlertType
     patientId?:   string
-    medicoId?:    string
-    medicoUserId: string
+    doctorId?:    string
+    doctorUserId: string
     // Only meaningful (and only ever passed) for a patient-scoped alert —
     // carried into the new_alert payload's patientName field exactly like
     // create() above does. Left undefined for the doctor-scoped event.
@@ -224,15 +224,15 @@ export class AlertService {
     message:      string
   }): Promise<void> {
     try {
-      if (Boolean(data.patientId) === Boolean(data.medicoId)) {
+      if (Boolean(data.patientId) === Boolean(data.doctorId)) {
         // Programmer error, not a user-facing condition — no caller here
         // is ever driven by untrusted request input for
-        // patientId/medicoId themselves (see each trigger site). Caught
+        // patientId/doctorId themselves (see each trigger site). Caught
         // by the outer try/catch below like any other failure in this
         // method — it must not surface as a 500 for an already-committed
         // primary mutation either.
         throw new Error(
-          'AlertService.createInformationAlert requires exactly one of patientId or medicoId',
+          'AlertService.createInformationAlert requires exactly one of patientId or doctorId',
         )
       }
 
@@ -244,7 +244,7 @@ export class AlertService {
       // nothing to signal about.
       const alert = await repo.create({
         patientId: data.patientId,
-        medicoId:  data.medicoId,
+        doctorId:  data.doctorId,
         type:      data.type,
         severity:  'INFO',
         message:   data.message,
@@ -257,13 +257,13 @@ export class AlertService {
       // off. Best-effort — never affects the already-persisted Alert.
       // Unchanged by this fix (already isolated on its own).
       try {
-        this.io?.to(`user:${data.medicoUserId}`).emit('alerts_changed', {
+        this.io?.to(`user:${data.doctorUserId}`).emit('alerts_changed', {
           alertId:   alert.id,
           patientId: data.patientId ?? null,
         })
       } catch (err) {
         logger.warn('alerts_changed emit failed — Alert already persisted, invalidation signal skipped', {
-          medicoUserId: data.medicoUserId,
+          doctorUserId: data.doctorUserId,
           alertId:      alert.id,
           err:          err instanceof Error ? err.message : String(err),
         })
@@ -277,12 +277,12 @@ export class AlertService {
       // catches its own failures and defaults to enabled (realtimeNotification.ts)
       // — unchanged by this fix, already isolated on its own.
       const realtimeEnabled = await isRealtimeNotificationEnabled(
-        data.medicoUserId,
+        data.doctorUserId,
         data.type as unknown as RealtimeAlertCategory,
       )
       if (realtimeEnabled) {
         try {
-          this.io?.to(`user:${data.medicoUserId}`).emit('new_alert', {
+          this.io?.to(`user:${data.doctorUserId}`).emit('new_alert', {
             id:          alert.id,
             patientId:   data.patientId ?? null,
             patientName: data.patientName,
@@ -292,7 +292,7 @@ export class AlertService {
           })
         } catch (err) {
           logger.warn('new_alert emit failed — Alert already persisted, delivery skipped', {
-            medicoUserId: data.medicoUserId,
+            doctorUserId: data.doctorUserId,
             alertId:      alert.id,
             type:         data.type,
             err:          err instanceof Error ? err.message : String(err),
@@ -300,7 +300,7 @@ export class AlertService {
         }
       } else {
         logger.info('new_alert suppressed by user notification preference', {
-          medicoUserId: data.medicoUserId,
+          doctorUserId: data.doctorUserId,
           alertId:      alert.id,
           type:         data.type,
         })
@@ -319,16 +319,16 @@ export class AlertService {
       logger.error('createInformationAlert failed — primary mutation already committed, no Alert was created', {
         type:         data.type,
         patientId:    data.patientId ?? null,
-        medicoId:     data.medicoId ?? null,
-        medicoUserId: data.medicoUserId,
+        doctorId:     data.doctorId ?? null,
+        doctorUserId: data.doctorUserId,
         err:          err instanceof Error ? err.message : String(err),
       })
     }
   }
 
   async list(userId: string, query: AlertQueryDtoType) {
-    const medico = await this.getMedicoOrThrow(userId)
-    const { data, total, unreadCount } = await repo.findByMedico(medico.id, {
+    const doctor = await this.getDoctorOrThrow(userId)
+    const { data, total, unreadCount } = await repo.findByDoctor(doctor.id, {
       page:     query.page,
       limit:    query.limit,
       unread:   query.unread,
@@ -342,44 +342,44 @@ export class AlertService {
   }
 
   async markRead(userId: string, alertId: string) {
-    const medico = await this.getMedicoOrThrow(userId)
+    const doctor = await this.getDoctorOrThrow(userId)
     const alert  = await repo.findById(alertId)
     if (!alert) throw new NotFoundError('Alert')
 
     // Z5 — ownership now has two paths (see schema.prisma Alert model
     // comment): patient-scoped (the pre-existing check, unchanged for
     // every prediction/INFO_PATIENT_*/INFO_HEALTH_RECORD_CREATED Alert) or
-    // doctor-scoped (alert.medicoId set directly — no live AlertType
+    // doctor-scoped (alert.doctorId set directly — no live AlertType
     // populates this path today, since Z6-R2 removed its one producer,
     // the doctor-profile information alert, but the check is kept generic
-    // rather than deleted). Exactly one branch runs — alert.patientId and alert.medicoId
+    // rather than deleted). Exactly one branch runs — alert.patientId and alert.doctorId
     // are never both set (the same invariant createInformationAlert
     // enforces at creation) — and a malformed row with NEITHER set fails
-    // safe here too (the ternary's else-branch compares alert.medicoId,
-    // null, against medico.id, never true).
+    // safe here too (the ternary's else-branch compares alert.doctorId,
+    // null, against doctor.id, never true).
     // Z8 §30 — isHidden=false added to the patient-scoped ownership check,
-    // consistent with ownedByMedico() in alert.repository.ts (used by
+    // consistent with ownedByDoctor() in alert.repository.ts (used by
     // list/unreadCount/markAllRead above). Safe: both branches already
     // collapse to the same generic ForbiddenError('Alert not accessible')
     // below regardless of cause, so this introduces no new leak — a hidden
     // patient's alert simply becomes "not accessible" like any foreign one.
     const owned = alert.patientId
-      ? Boolean(await prisma.paciente.findFirst({ where: { id: alert.patientId, medicoId: medico.id, isHidden: false } }))
-      : alert.medicoId === medico.id
+      ? Boolean(await prisma.patient.findFirst({ where: { id: alert.patientId, doctorId: doctor.id, isHidden: false } }))
+      : alert.doctorId === doctor.id
     if (!owned) throw new ForbiddenError('Alert not accessible')
 
     return repo.markRead(alertId)
   }
 
   async markAllRead(userId: string) {
-    const medico = await this.getMedicoOrThrow(userId)
-    await repo.markAllRead(medico.id)
+    const doctor = await this.getDoctorOrThrow(userId)
+    await repo.markAllRead(doctor.id)
     return { success: true }
   }
 
-  private async getMedicoOrThrow(userId: string) {
-    const medico = await prisma.medico.findUnique({ where: { userId } })
-    if (!medico) throw new ForbiddenError('Only doctors can access alerts')
-    return medico
+  private async getDoctorOrThrow(userId: string) {
+    const doctor = await prisma.doctor.findUnique({ where: { userId } })
+    if (!doctor) throw new ForbiddenError('Only doctors can access alerts')
+    return doctor
   }
 }

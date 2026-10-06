@@ -3,8 +3,8 @@ import type { AlertSeverity, AlertType, Prisma } from '@prisma/client'
 
 // Z5 — a doctor-visible Alert now has two mutually-exclusive ownership
 // paths (see the schema.prisma Alert model comment for the full invariant):
-// PATIENT-SCOPED (`patient.medicoId == medicoId`) or DOCTOR-SCOPED
-// (`alert.medicoId == medicoId` directly). Z6-R2 — no live AlertType
+// PATIENT-SCOPED (`patient.doctorId == doctorId`) or DOCTOR-SCOPED
+// (`alert.doctorId == doctorId` directly). Z6-R2 — no live AlertType
 // populates the doctor-scoped path anymore (its one producer, the
 // doctor-profile information alert, was removed), but the mechanism is kept
 // as generic infrastructure for any future doctor-scoped Alert, not deleted.
@@ -19,27 +19,27 @@ import type { AlertSeverity, AlertType, Prisma } from '@prisma/client'
 // hidden patient's persisted Alerts disappear from the normal Alerts
 // surface (list/unreadCount/markAllRead — every consumer of this function)
 // exactly like every other normal operational surface. The doctor-scoped
-// branch (`{ medicoId }` directly) is completely untouched — "generic
+// branch (`{ doctorId }` directly) is completely untouched — "generic
 // direct doctor-scoped Alert support remains" per the brief. No Alert row
 // is ever deleted or rewritten by this — once the patient is shown again,
 // their persisted patient-scoped alerts naturally become visible again
 // through this same predicate.
-function ownedByMedico(medicoId: string): Prisma.AlertWhereInput {
-  return { OR: [{ patient: { medicoId, isHidden: false } }, { medicoId }] }
+function ownedByDoctor(doctorId: string): Prisma.AlertWhereInput {
+  return { OR: [{ patient: { doctorId, isHidden: false } }, { doctorId }] }
 }
 
 export class AlertRepository {
-  // Z5 — patientId/medicoId are now both optional at the type level
+  // Z5 — patientId/doctorId are now both optional at the type level
   // (mirroring the nullable schema columns): callers are responsible for
   // supplying exactly one (AlertService.createInformationAlert enforces
   // this before ever reaching here; the pre-existing prediction-alert
   // caller in AlertService.create() continues to always pass patientId,
-  // never medicoId). `type` is new and optional — omitted (undefined) for
+  // never doctorId). `type` is new and optional — omitted (undefined) for
   // every pre-existing prediction-alert call site, exactly matching the
   // nullable AlertType column.
   async create(data: {
     patientId?:    string
-    medicoId?:     string
+    doctorId?:     string
     predictionId?: string
     type?:         AlertType
     severity:      AlertSeverity
@@ -53,11 +53,11 @@ export class AlertRepository {
 
   // U7.2 — search is ONE of three OR branches (name tokens, CURP, alert
   // message), always nested under the mandatory doctor-ownership predicate
-  // (Z5: ownedByMedico, formerly `patient: { medicoId }` alone) — a foreign
+  // (Z5: ownedByDoctor, formerly `patient: { doctorId }` alone) — a foreign
   // patient's data can never make their Alerts visible regardless of which
   // branch matches. Doctor scoping stays a top-level AND predicate, never
   // merely one arm of the search OR (section 6).
-  async findByMedico(medicoId: string, opts: {
+  async findByDoctor(doctorId: string, opts: {
     page:      number
     limit:     number
     unread?:   boolean
@@ -90,14 +90,14 @@ export class AlertRepository {
 
     // Z5 — composed as an explicit top-level AND array (rather than the
     // previous plain-object-with-spreads shape) specifically so
-    // ownedByMedico()'s own OR and searchOr's OR can coexist as two
+    // ownedByDoctor()'s own OR and searchOr's OR can coexist as two
     // independent AND members — a single JS object literal cannot hold two
     // same-named `OR` keys, and merging them into one OR would have been
     // WRONG (it would let search alone satisfy ownership). Semantically
     // identical to before for every filter that isn't ownership itself.
     const where: Prisma.AlertWhereInput = {
       AND: [
-        ownedByMedico(medicoId),
+        ownedByDoctor(doctorId),
         ...(unread !== undefined ? [{ isRead: !unread }] : []),
         ...(severity ? [{ severity }] : []),
         ...(searchOr ? [{ OR: searchOr }] : []),
@@ -118,7 +118,7 @@ export class AlertRepository {
     ])
 
     const unreadCount = await prisma.alert.count({
-      where: { AND: [ownedByMedico(medicoId), { isRead: false }] },
+      where: { AND: [ownedByDoctor(doctorId), { isRead: false }] },
     })
 
     return { data, total, unreadCount }
@@ -128,21 +128,21 @@ export class AlertRepository {
     return prisma.alert.update({ where: { id }, data: { isRead: true } })
   }
 
-  async markAllRead(medicoId: string) {
+  async markAllRead(doctorId: string) {
     return prisma.alert.updateMany({
-      where: { AND: [ownedByMedico(medicoId), { isRead: false }] },
+      where: { AND: [ownedByDoctor(doctorId), { isRead: false }] },
       data:  { isRead: true },
     })
   }
 
-  // Z5 — also includes `medico` (id only) alongside the pre-existing
+  // Z5 — also includes `doctor` (id only) alongside the pre-existing
   // `patient` include, so AlertService.markRead's ownership check (and any
   // other caller) can resolve either ownership path from one query, never
   // a second round-trip.
   async findById(id: string) {
     return prisma.alert.findUnique({
       where:   { id },
-      include: { patient: true, medico: { select: { id: true } } },
+      include: { patient: true, doctor: { select: { id: true } } },
     })
   }
 
@@ -150,7 +150,7 @@ export class AlertRepository {
   // it was used exclusively by patient.service.ts::getTimeline for the
   // now-deleted Alert-model timeline events, and by no other feature
   // (confirmed by repo-wide search before removal). The Alerts subsystem's
-  // own read paths (findByMedico, findById, markRead, markAllRead) are
+  // own read paths (findByDoctor, findById, markRead, markAllRead) are
   // untouched by that removal; Z5 above is the only later change to any of
   // them.
 }

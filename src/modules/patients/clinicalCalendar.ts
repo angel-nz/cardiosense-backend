@@ -14,16 +14,11 @@
 //   LEGACY_UNKNOWN    → never an event and never "automatic": listed neutrally in
 //                       the source record's metadata (historicalPredictions,
 //                       predictedAt DESC). NEW S2E-FIX4 — MANUAL no longer exists.
-//   RISK_CHANGE       → derived from consecutive AUTOMATIC predictions in clinical
-//                       order (LEGACY_UNKNOWN never feeds the chain). NEW S3 —
-//                       alert-like, so it is placed at its GENERATED time: the
-//                       current automatic Prediction's predictedAt (there is no
-//                       persisted Alert row representing exactly this event).
-//                       The source record's clinical time stays in metadata.
-//                       (Supersedes S2E-FIX4's clinical-time placement.)
-// Ordering: event instant (clinical for records/predictions, generated for
-// risk changes) → recordedAt → record id → type (record, prediction, risk
-// change) → predictedAt → id.
+//   RISK_CHANGE → source HealthRecord.measuredAt, never calculation time.
+//   Legacy records without measuredAt do not produce a dated risk-change event.
+// Ordering: clinical instant → recordedAt → record id → type (record,
+// prediction, risk change) → calculation time → event id. Shared groupId
+// keeps related events together on both product calendars.
 //
 // R/S never call this module; it does not change any R evidence query,
 // Prediction canonicalization or S read path.
@@ -143,23 +138,22 @@ export async function buildClinicalCalendarEvents(scope: Prisma.HealthRecordWher
   // RISK_CHANGE — chain = consecutive AUTOMATIC predictions in CLINICAL order
   // (per patient, over the patient's whole automatic history); an event is
   // emitted for a level change and belongs to the requested range when its
-  // GENERATED time (current prediction's predictedAt) is in [from, to).
+  // source measuredAt is in [from, to).
   for (const e of await riskChangeEvents(scope, from, to)) {
-    keyed.push({ event: e.event, k: [e.at, e.at, e.recordId, TYPE_PRIORITY.RISK_CHANGE, e.at, e.event.id] })
+    keyed.push({ event: e.event, k: [e.at, e.recordedAt, e.recordId, TYPE_PRIORITY.RISK_CHANGE, e.predictedAt, e.event.id] })
   }
 
   return keyed.sort((a, b) => compareKeys(a.k, b.k)).map(x => x.event)
 }
 
-// NEW S3 — RISK_CHANGE events at GENERATED time.
-async function riskChangeEvents(scope: Prisma.HealthRecordWhereInput, from?: Date, to?: Date): Promise<Array<{ event: RiskChangeTimelineEvent; at: number; recordId: string }>> {
+// PRE-T-UX1 — clinical placement, calculation time retained only as provenance.
+async function riskChangeEvents(scope: Prisma.HealthRecordWhereInput, from?: Date, to?: Date): Promise<Array<{ event: RiskChangeTimelineEvent; at: number; recordedAt: number; predictedAt: number; recordId: string }>> {
   const inRange = (d: Date) => (!from || d >= from) && (!to || d < to)
-  // Patients that have an automatic prediction GENERATED in range.
+  // Candidate selection must use the same clinical range as event placement.
   const candidates = await prisma.prediction.findMany({
     where: {
       origin: 'AUTOMATIC_HEALTH_RECORD',
-      healthRecord: { is: scope },
-      ...(from || to ? { predictedAt: { ...(from ? { gte: from } : {}), ...(to ? { lt: to } : {}) } } : {}),
+      healthRecord: { is: { AND: [scope, { clinicalTimeSource: 'CLINICIAN_ENTERED', measuredAt: { not: null, ...(from ? { gte: from } : {}), ...(to ? { lt: to } : {}) } }] } },
     },
     select: { patientId: true },
     distinct: ['patientId'],
@@ -171,7 +165,7 @@ async function riskChangeEvents(scope: Prisma.HealthRecordWhereInput, from?: Dat
   })
   const byPatient = new Map<string, typeof chainRows>()
   for (const p of chainRows) { if (!p.healthRecord) continue; const l = byPatient.get(p.patientId) ?? []; l.push(p); byPatient.set(p.patientId, l) }
-  const out: Array<{ event: RiskChangeTimelineEvent; at: number; recordId: string }> = []
+  const out: Array<{ event: RiskChangeTimelineEvent; at: number; recordedAt: number; predictedAt: number; recordId: string }> = []
   for (const [patientId, seq] of byPatient) {
     const key = (p: (typeof seq)[number]): Keyed['k'] => {
       const r = p.healthRecord!
@@ -180,16 +174,16 @@ async function riskChangeEvents(scope: Prisma.HealthRecordWhereInput, from?: Dat
     seq.sort((a, b) => compareKeys(key(a), key(b)))
     for (let i = 1; i < seq.length; i++) {
       const prev = seq[i - 1], cur = seq[i], r = cur.healthRecord!
-      if (prev.riskLevel === cur.riskLevel || !inRange(cur.predictedAt)) continue
+      if (prev.riskLevel === cur.riskLevel || !isMeasured(r) || !inRange(r.measuredAt!)) continue
       out.push({
-        at: cur.predictedAt.getTime(), recordId: r.id,
+        at: r.measuredAt!.getTime(), recordedAt: r.recordedAt.getTime(), predictedAt: cur.predictedAt.getTime(), recordId: r.id,
         event: {
-          id: `risk-change:${cur.id}`, patientId, eventType: 'RISK_CHANGE', eventDate: cur.predictedAt.toISOString(),
+          id: `risk-change:${cur.id}`, patientId, eventType: 'RISK_CHANGE', eventDate: r.measuredAt!.toISOString(),
           metadata: {
             fromLevel: prev.riskLevel, toLevel: cur.riskLevel, previousPredictionId: prev.id, currentPredictionId: cur.id,
             healthRecordId: r.id, clinicalTimeSource: isMeasured(r) ? 'CLINICIAN_ENTERED' : 'LEGACY_ENTRY_TIME',
             currentPredictedAt: cur.predictedAt.toISOString(),
-            clinicalAt: effectiveClinicalTime(r).toISOString(),
+            clinicalAt: r.measuredAt!.toISOString(),
             generatedAt: cur.predictedAt.toISOString(),
           },
           groupId: buildHealthRecordGroupId(patientId, r.id),

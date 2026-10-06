@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+// PRE-T-B — strict object: obsolete/unknown clinical fields are rejected
+// rather than silently stripped.
 export const CreateRecordDto = z.object({
   patientId:     z.string().uuid(),
   // U3.2 — optional (was required): age is now derived authoritatively by
@@ -17,10 +19,9 @@ export const CreateRecordDto = z.object({
   sysBP:         z.number().min(60).max(300),
   diaBP:         z.number().min(40).max(200),
   bmi:           z.number().min(10).max(80),
-  heartRate:     z.number().int().min(30).max(250),
   glucose:       z.number().min(30).max(500),
   notes:         z.string().max(1000).optional(),
-})
+}).strict()
 
 export const RecordQueryDto = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -29,8 +30,8 @@ export const RecordQueryDto = z.object({
 export type CreateRecordDtoType = z.infer<typeof CreateRecordDto>
 
 // NEW S2A — HTTP request contract for POST /health-records.
-// `CreateRecordDto` above is deliberately left byte-for-byte unchanged: it is
-// also the CLINICAL model-input contract that the frozen R evidence builder
+// `CreateRecordDto` above remains the canonical CLINICAL model-input contract
+// used by the frozen R evidence builder
 // (evidence.builder.ts::isValidModelInput) parses, and REAL clinical time is
 // not a model input. The request DTO extends it with:
 //   measuredAt — REQUIRED (A4) REAL clinical instant: ONE UTC ISO-8601 string
@@ -60,6 +61,6 @@ export const CreateHealthRecordRequestDto = CreateRecordDto.extend({
   clinicalTimeSource: z.undefined({
     invalid_type_error: 'clinicalTimeSource is assigned by the server and must not be sent',
   }).optional(),
-})
+}).strict()
 
 export type CreateHealthRecordRequestDtoType = z.infer<typeof CreateHealthRecordRequestDto>

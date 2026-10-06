@@ -13,7 +13,7 @@
 //   personalizationStatus  = persisted NEW-R status, never inferred from
 //                            whether the scores differ (γ = 0 can be
 //                            INDIVIDUALIZED with riskScore == globalRiskScore)
-//   personalizationVersion = e.g. "R-BPBC-1"
+//   personalizationVersion = e.g. "R-BPBC-3" (historical rows may remain R-BPBC-2)
 //
 // Legacy rows (personalizationStatus NULL) serialize as:
 //   globalRiskScore = riskScore, personalizationStatus/Version = null,

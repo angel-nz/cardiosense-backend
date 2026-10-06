@@ -1,6 +1,6 @@
 // NEW S2C — backend client for AI POST /forecast/score.
 //
-// Accepts ONLY: the expected model version, 1–3 simulated 12-feature target
+// Accepts ONLY: the expected model version, 1–3 simulated 11-feature target
 // states (rebuilt field-by-field, so nothing else can leak), and optionally a
 // COMPATIBLE typed appliedLogit. No patient/record ids, no Predictions, no
 // provenance, no RiskForecast rows. No mock / synthetic fallback: any AI or
@@ -31,7 +31,7 @@ export interface ForecastScore {
   interpretation:  ForecastInterpretation
 }
 
-const FIELDS: (keyof SSimulatedState)[] = ['age', 'sex', 'currentSmoker', 'cigsPerDay', 'BPMeds', 'diabetes', 'totChol', 'sysBP', 'diaBP', 'BMI', 'heartRate', 'glucose']
+const FIELDS: (keyof SSimulatedState)[] = ['age', 'sex', 'currentSmoker', 'cigsPerDay', 'BPMeds', 'diabetes', 'totChol', 'sysBP', 'diaBP', 'BMI', 'glucose']
 const pick = (s: SSimulatedState) => Object.fromEntries(FIELDS.map(f => [f, s[f]])) as unknown as SSimulatedState
 
 const isScore = (v: unknown): v is number =>

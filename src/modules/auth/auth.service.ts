@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs'
 import type { Request, Response } from 'express'
-import { Prisma } from '@prisma/client'
+import { Prisma, type Role } from '@prisma/client'
 import { prisma } from '@/config/prisma'
 import { signAccessToken } from '@/lib/jwt'
 import {
@@ -23,6 +23,7 @@ import {
 import { REFRESH_COOKIE_NAME } from '@/lib/cookies'
 import { disconnectSessionSockets } from '@/socket/socketServer'
 import type { RegisterDtoType, LoginDtoType } from './auth.dto'
+import { registrationRoleToDatabase, toPublicDoctorProfile, toPublicRole } from '@/lib/publicIdentity'
 
 export class AuthService {
   // ─── Register ───────────────────────────────────────────────────────
@@ -39,7 +40,7 @@ export class AuthService {
   // (Prisma's generated where-unique type for a nullable `@unique` column
   // does not accept `null` — a unique index never matches NULL anyway, so
   // there is nothing meaningful to pre-check there regardless). The nested
-  // `user.create({ data: { medico: { create: {...} } } })` below is ONE
+  // `user.create({ data: { doctor: { create: {...} } } })` below is ONE
   // Prisma write — User and Medico (email and phone together) are
   // persisted atomically; there is no separate second request that could
   // leave one without the other (§9's explicit requirement).
@@ -49,7 +50,7 @@ export class AuthService {
       if (existingEmail) throw new ConflictError('Email already registered')
     }
     if (dto.phone) {
-      const existingPhone = await prisma.medico.findUnique({ where: { phone: dto.phone } })
+      const existingPhone = await prisma.doctor.findUnique({ where: { phone: dto.phone } })
       if (existingPhone) throw new ConflictError('Phone already registered')
     }
 
@@ -67,12 +68,12 @@ export class AuthService {
           passwordHash,
           firstName: dto.firstName,
           lastName: dto.lastName,
-          role: dto.role as 'MEDICO' | 'ADMIN',
+          role: registrationRoleToDatabase(dto.role),
           ...(dto.role === 'MEDICO' && {
-            medico: {
+            doctor: {
               create: {
-                cedulaProfesional: dto.cedulaProfesional,
-                especialidad: dto.especialidad,
+                professionalLicense: dto.cedulaProfesional,
+                specialty: dto.especialidad,
                 hospital: dto.hospital,
                 // Z6-R1 — persisted atomically with the User row created in
                 // this same nested write (see method comment above).
@@ -85,7 +86,7 @@ export class AuthService {
         // AvatarImage row, but `include`s the relation for shape consistency
         // with login/refresh/me below — sanitizeUser() is the one shared
         // function all four paths funnel through, and it expects this field.
-        include: { medico: true, avatarImage: { select: { updatedAt: true } } },
+        include: { doctor: true, avatarImage: { select: { updatedAt: true } } },
       })
     } catch (err) {
       // Z6-R1 §10 — defense in depth for the rare race the pre-checks above
@@ -106,7 +107,7 @@ export class AuthService {
     // stable session id (Y8C-R2 §5 — never a second, independently-
     // generated id; never derived from the refresh JWT's own jti).
     const sid = await createSession(res, user.id, userAgent)
-    const accessToken = signAccessToken({ sub: user.id, email: user.email, role: user.role, sid })
+    const accessToken = signAccessToken({ sub: user.id, email: user.email, role: toPublicRole(user.role), sid })
 
     return { user: this.sanitizeUser(user), accessToken }
   }
@@ -129,7 +130,7 @@ export class AuthService {
   // below, so a dual-identifier account logs in as the SAME User/session
   // regardless of which identifier it used (§15).
   async login(dto: LoginDtoType, res: Response, userAgent: string | null) {
-    const userInclude = { medico: true, avatarImage: { select: { updatedAt: true as const } } }
+    const userInclude = { doctor: true, avatarImage: { select: { updatedAt: true as const } } }
     type LoginUser = Prisma.UserGetPayload<{ include: typeof userInclude }>
 
     let user: LoginUser | null = null
@@ -140,12 +141,12 @@ export class AuthService {
         include: userInclude,
       })
     } else {
-      const medico = await prisma.medico.findUnique({
+      const doctor = await prisma.doctor.findUnique({
         where: { phone: dto.identifier },
         select: { userId: true },
       })
-      if (medico) {
-        user = await prisma.user.findUnique({ where: { id: medico.userId }, include: userInclude })
+      if (doctor) {
+        user = await prisma.user.findUnique({ where: { id: doctor.userId }, include: userInclude })
       }
     }
 
@@ -163,7 +164,7 @@ export class AuthService {
 
     // Y8D2 — same reordering/reasoning as register() above.
     const sid = await createSession(res, user.id, userAgent)
-    const accessToken = signAccessToken({ sub: user.id, email: user.email, role: user.role, sid })
+    const accessToken = signAccessToken({ sub: user.id, email: user.email, role: toPublicRole(user.role), sid })
 
     return { user: this.sanitizeUser(user), accessToken }
   }
@@ -227,22 +228,22 @@ export class AuthService {
 
     // Y3.1B §19/§25 — this call previously had NO `include` at all (a plain
     // findUnique), yet still fed the same shared sanitizeUser() below —
-    // meaning `refresh()`'s response silently omitted `medico` too, not just
+    // meaning `refresh()`'s response silently omitted `doctor` too, not just
     // avatar. That gap was left out of scope at the time (a different,
     // unrelated concern that block was not asked to fix), but it is exactly
     // the PRE-R2B-FIX2 auth-rehydration defect: login/register/me all
-    // `include: { medico: true, ... }`, so `especialidad`/`phone`/etc. are
+    // `include: { doctor: true, ... }`, so `especialidad`/`phone`/etc. are
     // present immediately after login, then silently disappear the moment
     // AuthContext's bootstrap effect redeems the refresh cookie through this
     // method on the next page load — the ONE of these four user-data paths
-    // that dropped `medico`. Fixed here by including it the same way the
+    // that dropped `doctor`. Fixed here by including it the same way the
     // other three already do, so all four paths share one identical User
     // wire-shape (PRE-R2B-FIX2's Canonical Authenticated User Contract).
     let user
     try {
       user = await prisma.user.findUnique({
         where:   { id: userId },
-        include: { medico: true, avatarImage: { select: { updatedAt: true } } },
+        include: { doctor: true, avatarImage: { select: { updatedAt: true } } },
       })
     } catch (err) {
       // Y8D1 §13 — a thrown exception from the lookup itself (operational
@@ -290,7 +291,7 @@ export class AuthService {
     // (rotateSession updates the row in place, never changing its id), so
     // the newly-minted access token names exactly the session that was
     // just rotated.
-    const accessToken = signAccessToken({ sub: user.id, email: user.email, role: user.role, sid })
+    const accessToken = signAccessToken({ sub: user.id, email: user.email, role: toPublicRole(user.role), sid })
     return { user: this.sanitizeUser(user), accessToken }
   }
 
@@ -344,7 +345,7 @@ export class AuthService {
   async me(userId: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      include: { medico: true, avatarImage: { select: { updatedAt: true } } },
+      include: { doctor: true, avatarImage: { select: { updatedAt: true } } },
     })
     if (!user) throw new NotFoundError('User')
     return this.sanitizeUser(user)
@@ -358,13 +359,13 @@ export class AuthService {
   // dedicated GET /users/me/avatar route, never through this function).
   private sanitizeUser(user: {
     // Z6-R1 — nullable: a phone-only doctor has no email at all.
-    id: string; email: string | null; firstName: string; lastName: string; role: string; isActive: boolean; createdAt: Date
+    id: string; email: string | null; firstName: string; lastName: string; role: Role; isActive: boolean; createdAt: Date
     // PRE-R2B-FIX2 — widened to the full Medico shape (this already was what
     // register()/login()/me() passed through at runtime via their own
-    // `include: { medico: true }`; only this declared parameter type under-
+    // `include: { doctor: true }`; only this declared parameter type under-
     // stated it as especialidad/hospital-only). Now that refresh() includes
-    // `medico` too, this type accurately reflects every caller.
-    medico?: { id: string; cedulaProfesional: string | null; especialidad: string | null; hospital: string | null; phone: string | null } | null
+    // `doctor` too, this type accurately reflects every caller.
+    doctor?: { id: string; professionalLicense: string | null; specialty: string | null; hospital: string | null; phone: string | null } | null
     avatarImage?: { updatedAt: Date } | null
   }) {
     return {
@@ -372,10 +373,10 @@ export class AuthService {
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
-      role: user.role,
+      role: toPublicRole(user.role),
       isActive: user.isActive,
       createdAt: user.createdAt,
-      medico: user.medico ?? undefined,
+      medico: toPublicDoctorProfile(user.doctor),
       avatar: user.avatarImage ? { updatedAt: user.avatarImage.updatedAt } : null,
     }
   }

@@ -24,7 +24,7 @@ export interface SPatientInput {
 
 export interface SRealRecordInput {
   id:                 string
-  recordedAt:         Date                 // entry instant (R's axis; S tie-break / legacy fallback)
+  recordedAt:         Date                 // technical entry instant (S tie-break / legacy fallback; NEVER R causal time)
   measuredAt:         Date | null          // REAL clinical instant (CLINICIAN_ENTERED only)
   clinicalTimeSource: SClinicalTimeSource
   age:                number               // persisted age of the record
@@ -36,7 +36,6 @@ export interface SRealRecordInput {
   sysBP:              DecimalLike
   diaBP:              DecimalLike
   bmi:                DecimalLike
-  heartRate:          number
   glucose:            DecimalLike
 }
 
@@ -146,7 +145,7 @@ export interface SAnchor {
   cutoffLocalDay:     string   // YYYY-MM-DD, Guadalajara
 }
 
-// The 12 model inputs in the AI PredictRequest naming (same shape as
+// The 11 model inputs in the AI PredictRequest naming (same shape as
 // lib/aiInput.ts AIPredictionInput): booleans as 0|1, JSON numbers.
 export interface SSimulatedState {
   age:           number
@@ -159,14 +158,13 @@ export interface SSimulatedState {
   sysBP:         number
   diaBP:         number
   BMI:           number
-  heartRate:     number
   glucose:       number
 }
 
 // NEW S3 — 'LOCF' (S-FEAT-LOCF-1) is superseded: continuous indicators are
 // ROBUST_TREND (non-zero effective slope) or ROBUST_TREND_FLAT (estimated
 // flat trend — the value may equal the anchor but is NOT a carried value).
-// NEW S4 — SEQUENTIAL_ROBUST_TREND / _FLAT (S-FEAT-SEQUENTIAL-ROBUST-1). The
+// NEW S4 — SEQUENTIAL_ROBUST_TREND / _FLAT (S-FEAT-SEQUENTIAL-ROBUST-2). The
 // ROBUST_TREND* values remain only on historical S-2 rows.
 export type SFeatureProvenance = 'DERIVED' | 'CARRY_FORWARD' | 'CONDITIONAL' | 'ROBUST_TREND' | 'ROBUST_TREND_FLAT' | 'SEQUENTIAL_ROBUST_TREND' | 'SEQUENTIAL_ROBUST_FLAT'
 
@@ -181,7 +179,7 @@ export interface SFeatureTrend {
   effectiveSlope:   number      // rawSlope × trendConsistency
 }
 
-// NEW S4 — weighted (S-FEAT-SEQUENTIAL-ROBUST-1) per-feature trend.
+// NEW S4 — weighted (S-FEAT-SEQUENTIAL-ROBUST-2) per-feature trend.
 export interface SWeightedFeatureTrend {
   pairCount:        number      // pairs with distinct effective instants
   rawSlope:         number      // weighted median of pairwise slopes, units/day

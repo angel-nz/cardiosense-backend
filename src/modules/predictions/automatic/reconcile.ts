@@ -52,7 +52,7 @@ export async function runPredictionReconcile(opts: { apply: boolean; reopenBlock
            h.id AS "healthRecordId", to_char(h.measured_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "clinicalAt",
            t.status::text AS "taskStatus", t.attempt_count AS "attemptCount", t.last_error_code AS "lastErrorCode"
     FROM health_records h
-    JOIN pacientes pa ON pa.id = h.patient_id
+    JOIN patients pa ON pa.id = h.patient_id
     LEFT JOIN automatic_prediction_tasks t ON t.health_record_id = h.id
     WHERE h.clinical_time_source = 'CLINICIAN_ENTERED'
       AND NOT EXISTS (SELECT 1 FROM predictions p WHERE p.health_record_id = h.id)

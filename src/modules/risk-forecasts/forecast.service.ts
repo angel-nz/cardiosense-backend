@@ -12,9 +12,9 @@ export class RiskForecastService {
   // Same ownership/concealment rule as every patient-scoped read: hidden
   // patients behave exactly like nonexistent ones (404).
   private async ownedPatient(userId: string, patientId: string) {
-    const medico = await prisma.medico.findUnique({ where: { userId } })
-    if (!medico) throw new ForbiddenError('Only doctors can access risk projections')
-    const patient = await prisma.paciente.findFirst({ where: { id: patientId, medicoId: medico.id, isHidden: false }, select: { id: true, isActive: true } })
+    const doctor = await prisma.doctor.findUnique({ where: { userId } })
+    if (!doctor) throw new ForbiddenError('Only doctors can access risk projections')
+    const patient = await prisma.patient.findFirst({ where: { id: patientId, doctorId: doctor.id, isHidden: false }, select: { id: true, isActive: true } })
     if (!patient) throw new NotFoundError('Patient')
     return patient
   }

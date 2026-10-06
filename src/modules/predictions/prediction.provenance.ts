@@ -1,6 +1,6 @@
 // R2 — API exposure policy for prediction provenance.
 //
-// Prediction.inputSnapshot (the exact 12-value object sent to the AI) is
+// Prediction.inputSnapshot (the exact 11-value object sent to the AI) is
 // PERSISTENCE-ONLY in R2: it exists so a prediction can later be explained
 // as made, not for doctors or the current frontend to consume. Prisma
 // returns every scalar column of a model by default (no `select`), and this

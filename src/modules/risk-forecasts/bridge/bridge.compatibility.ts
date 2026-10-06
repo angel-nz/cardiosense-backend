@@ -11,7 +11,7 @@
 //                                                      BRIDGE_VERSION_MISMATCH
 //   B4 sex                                             BRIDGE_SEX_MISMATCH
 //   B5 anchor age (CURRENT birthDate, anchor day)      BRIDGE_AGE_MISMATCH
-//   B6 R entry-time axis                               R_TIME_AXIS_MISMATCH
+//   B6 R measured clinical-time axis                   R_TIME_AXIS_MISMATCH
 // Nothing here recomputes R or reads provenance.
 import { effectiveClinicalInstant, localClinicalDay } from '../domain/clinicalTime'
 import { ageOnDate } from '../domain/simulation'
@@ -69,13 +69,18 @@ export function evaluateBridgeCompatibility(i: BridgeCompatibilityInput): Bridge
   // Guadalajara clinical day (detects a birthDate edit after capture).
   const anchorDay = localClinicalDay(effectiveClinicalInstant(i.anchor))
   if (b.anchorAge !== ageOnDate(i.patient.birthDate, anchorDay)) return no('BRIDGE_AGE_MISMATCH')
-  // B6 — the S anchor must also be the latest REAL record on R's entry-time
-  // axis. R4B's evidence for the anchor contains only records with
-  // recordedAt STRICTLY before it, so ANY other REAL record entered at or
-  // after the anchor's recordedAt (a later-entered back-dated record, or an
-  // exact entry-time tie) is information the R state never saw.
-  const aMs = i.anchor.recordedAt.getTime()
+  // B6 — PRE-T-R1: the S anchor must also be latest on R-BPBC-3's measured
+  // clinical-time axis. R sees only CLINICIAN_ENTERED rows with measuredAt
+  // STRICTLY before the anchor. Equal/future measured rows are information
+  // that the anchor's R state did not use. LEGACY_ENTRY_TIME / measuredAt NULL
+  // are not on R's causal axis and therefore do not create a mismatch here.
   if (!i.records.some(r => r.id === i.anchor.id)) return no('BRIDGE_ANCHOR_MISMATCH')
-  if (i.records.some(r => r.id !== i.anchor.id && r.recordedAt.getTime() >= aMs)) return no('R_TIME_AXIS_MISMATCH')
+  if (i.anchor.clinicalTimeSource !== 'CLINICIAN_ENTERED' || !(i.anchor.measuredAt instanceof Date) ||
+      !Number.isFinite(i.anchor.measuredAt.getTime())) return no('R_TIME_AXIS_MISMATCH')
+  const aMs = i.anchor.measuredAt.getTime()
+  if (i.records.some(r => r.id !== i.anchor.id && r.clinicalTimeSource === 'CLINICIAN_ENTERED' &&
+      r.measuredAt instanceof Date && Number.isFinite(r.measuredAt.getTime()) && r.measuredAt.getTime() >= aMs)) {
+    return no('R_TIME_AXIS_MISMATCH')
+  }
   return { compatible: true, bridgeStateId: b.id, appliedLogit: b.appliedLogit, interpretation: 'INDIVIDUALIZED_BRIDGE' }
 }

@@ -51,9 +51,8 @@ interface RiskChangeMetadata {
   healthRecordId?: string
   clinicalTimeSource?: 'CLINICIAN_ENTERED' | 'LEGACY_ENTRY_TIME'
   currentPredictedAt?: string
-  // NEW S3 — eventDate is the GENERATED time (= generatedAt = current
-  // prediction's predictedAt); clinicalAt = source record's effective
-  // clinical time, kept as context. Supersedes FIX4's clinical placement.
+  // PRE-T-UX1: eventDate and clinicalAt are the source measuredAt.
+  // generatedAt/currentPredictedAt are calculation provenance only.
   clinicalAt?: string
   generatedAt?: string
 }
@@ -144,7 +143,7 @@ export function buildHealthRecordGroupId(patientId: string, healthRecordId: stri
 // (recordedAt isn't editable yet), but recordedAt is the semantically
 // correct field and future-proofs against that changing. Identity: the
 // HealthRecord's own id. Metadata is a summary, not the full clinical
-// record (12 fields) — the timeline is not a replacement for the patient's
+// record (model-relevant fields plus record metadata) — the timeline is not a replacement for the patient's
 // existing clinical history view.
 export function toClinicalRecordEvent(record: HealthRecordRow): ClinicalRecordTimelineEvent {
   return {

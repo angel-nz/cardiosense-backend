@@ -10,7 +10,7 @@
 //            robust-median / missed-visit semantics; a reliably detected TWO-
 //            mode cadence yields a deterministic interval SEQUENCE instead of
 //            abstaining;
-//   features S-FEAT-SEQUENTIAL-ROBUST-1 (supersedes S-FEAT-ROBUST-TREND-1):
+//   features S-FEAT-SEQUENTIAL-ROBUST-2 (supersedes S-FEAT-ROBUST-TREND-1):
 //            weighted Theil–Sen over ALL usable REAL records, F2 also uses the
 //            in-run F1 state, F3 also F1 + F2 (latest REAL weight 1.25,
 //            simulated weight 0.50).
@@ -21,7 +21,7 @@
 export const S_VERSION = 'S-3' as const
 export const CLINICAL_TIME_POLICY_VERSION = 'S-TIME-1' as const
 export const CADENCE_POLICY_VERSION = 'S-CAD-3' as const
-export const FEATURE_POLICY_VERSION = 'S-FEAT-SEQUENTIAL-ROBUST-1' as const
+export const FEATURE_POLICY_VERSION = 'S-FEAT-SEQUENTIAL-ROBUST-2' as const
 export const FINGERPRINT_SCHEMA_VERSION = 'S-FP-1' as const
 
 export interface SPolicyVersions {
@@ -54,7 +54,7 @@ export const CAD_DELTA_MAX_DAYS = 120
 // ── S-FEAT-ROBUST-TREND-1 (NEW S3) ───────────────────────────────────────
 // Continuous indicators forecast by a Theil–Sen trend over REAL measured
 // visits, shrunk by directional consistency. Discrete states are carried.
-export const TREND_FEATURES = ['totChol', 'sysBP', 'diaBP', 'BMI', 'heartRate', 'glucose'] as const
+export const TREND_FEATURES = ['totChol', 'sysBP', 'diaBP', 'BMI', 'glucose'] as const
 
 // ── S-CAD-3 (NEW S4) ─────────────────────────────────────────────────────
 // Multimodal path (two modes) — reuses the S-CAD-2 split evidence
@@ -64,7 +64,7 @@ export const TREND_FEATURES = ['totChol', 'sysBP', 'diaBP', 'BMI', 'heartRate', 
 // Mode value = robust median of its members, round-half-up, bounds 1..120.
 export const CAD3_MIN_MODE_MEMBERS = 2
 
-// ── S-FEAT-SEQUENTIAL-ROBUST-1 (NEW S4) ──────────────────────────────────
+// ── S-FEAT-SEQUENTIAL-ROBUST-2 (NEW S4) ──────────────────────────────────
 // Point weights of the weighted Theil–Sen context (policy constants):
 export const SEQ_WEIGHT_ORDINARY_REAL = 1.0
 export const SEQ_WEIGHT_LATEST_REAL = 1.25     // the clinically latest REAL record ("slight priority")

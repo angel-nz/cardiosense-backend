@@ -125,13 +125,14 @@ Serialización central: `src/modules/predictions/prediction.serializer.ts` (allo
 | `modelVersion`              | Versión del modelo GLOBAL                                                   | sí                | sí                         |
 | `anomalyScore`, `isAnomaly` | Anomalía GLOBAL (no existe anomalía personalizada)                          | sí                | sí                         |
 | `personalizationStatus`     | `INDIVIDUALIZED` / `GLOBAL_INSUFFICIENT_HISTORY` / `GLOBAL_INCOMPATIBLE_HISTORY` / `GLOBAL_ERROR_FALLBACK`; `null` = predicción legacy | sí | sí |
-| `personalizationVersion`    | p. ej. `R-BPBC-1`; `null` = legacy                                          | sí                | sí                         |
+| `personalizationVersion`    | vigente `R-BPBC-3`; filas históricas conservan su versión (p. ej. `R-BPBC-2`); `null` = legacy | sí | sí |
 | `personalizationProvenance` | Metadatos de auditoría (conteos, corte causal, huella, γ, ganancias, razón de fallback). No es una medida de exactitud ni de confianza clínica. | NO | sí |
 | `featureImportance`         | Importancia del modelo GLOBAL (solo en la respuesta de POST, no persistida) | —                 | solo POST                  |
 | `sexUsed`                   | Interno (comparabilidad de π). Nunca se expone.                             | NO                | NO                         |
 
 - `INDIVIDUALIZED` significa que el mecanismo congelado condicionado por la historia se aplicó; no implica mayor exactitud, validación clínica ni entrenamiento con el paciente. Con γ = 0 puede ser `INDIVIDUALIZED` con `riskScore == globalRiskScore`; el estado nunca se infiere de la diferencia de scores.
 - Predicciones legacy: `globalRiskScore = riskScore`, `personalizationStatus/Version/Provenance = null` (solo serialización; la fila no se modifica).
+- Phase R vigente: `R-BPBC-3`. El reloj causal clínico es exclusivamente `measuredAt`; `recordedAt` es técnico/auditoría y no es fallback. Filas `measuredAt = NULL` no participan como evidencia R.
 - Las predicciones embebidas en `GET /api/patients/:id/history` usan el contrato de lista.
 - Alertas de riesgo: usan el riesgo FINAL (HIGH → CRITICAL; si no, anomalía GLOBAL → WARNING; si no, MODERATE → WARNING; máximo una por predicción). Los eventos Socket.IO se emiten solo después del commit; `prediction_completed` lleva `riskScore`/`riskLevel` FINALES y no incluye `sexUsed` ni la provenance.
 
@@ -169,12 +170,24 @@ Serialización central: `src/modules/predictions/prediction.serializer.ts` (allo
 | `unsubscribe_patient` | `patientId: string` | Salir de`patient:{id}` |
 | `ping`                | —                    | Keepalive                |
 
-## Credenciales de demo (seed)
+## Base comercial de demostración
+
+El seed canónico posterior a Phase T reconstruye una instancia local/demo amplia y sintética. No inserta Predictions ni forecasts inventados: crea pacientes y HealthRecords mediante los servicios de dominio, drena las tareas automáticas y exige un AI Service saludable con `Skorp-Beta-0.2` antes de completar.
+
+Credenciales de desarrollo preservadas:
 
 | Rol     | Email                        | Contraseña    |
 | ------- | ---------------------------- | -------------- |
 | Admin   | `admin@cardiosense.mx`     | `Admin1234!` |
 | Médico | `dr.garcia@cardiosense.mx` | `Demo1234!`  |
+
+El reset es intencionalmente destructivo y está protegido. Solo se autoriza para una DB local CardioSense no productiva y requiere confirmación explícita:
+
+```bash
+CARDIOSENSE_DEMO_RESET=YES npm run demo:reset
+```
+
+Antes de usarlo sobre una DB CURRENT existente, validar primero la migración forward `20261005233000_english_database_identifiers` sobre esa DB y comprobar que los datos preexistentes siguen accesibles. Tras el reset/seed ejecutar `prisma/validation/POST-T-DB1-INVARIANTS.sql`.
 
 ## Deploy (Railway)
 
@@ -182,4 +195,4 @@ Serialización central: `src/modules/predictions/prediction.serializer.ts` (allo
 2. Agregar variables de entorno del `.env.example`
 3. Build command: `npm run build`
 4. Start command: `npm start`
-5. Post-deploy: `npm run prisma:migrate && npm run prisma:seed`
+5. Aplicar migraciones de producción con `npx prisma migrate deploy`. **No ejecutar el commercial demo seed en producción.**

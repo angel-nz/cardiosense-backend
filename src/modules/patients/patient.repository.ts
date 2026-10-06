@@ -27,7 +27,7 @@ export class PatientRepository {
   // related row" predicate, so the smallest correct strategy (no raw SQL,
   // no schema change, no approximation) is: resolve the candidate patient
   // ids whose latest Prediction matches in one prefilter query — reusing
-  // the exact same medicoId+search+status scoping (`baseWhere`) so search,
+  // the exact same doctorId+search+status scoping (`baseWhere`) so search,
   // risk and lifecycle status compose correctly together — then apply that
   // id set to the real paginated/counted query below, so `total`/
   // `totalPages` describe the risk-filtered dataset itself, not an
@@ -45,14 +45,14 @@ export class PatientRepository {
   // pagination can never imply more/fewer patients exist than the filtered
   // set actually has (Z8 §13's "pagination total must use exactly the same
   // predicate as result rows").
-  async findAll(medicoId: string, opts: {
+  async findAll(doctorId: string, opts: {
     page: number; limit: number; search?: string; risk?: RiskLevel; status: PatientStatusFilter
   }) {
     const { page, limit, search, risk, status } = opts
     const skip = (page - 1) * limit
 
-    const baseWhere: Prisma.PacienteWhereInput = {
-      medicoId,
+    const baseWhere: Prisma.PatientWhereInput = {
+      doctorId,
       isHidden: false,
       ...(status === 'ACTIVE'   && { isActive: true }),
       ...(status === 'INACTIVE' && { isActive: false }),
@@ -74,14 +74,14 @@ export class PatientRepository {
     // the patient's latest CLINICAL time DESC (never Paciente.updatedAt,
     // which only reflects personal-info edits). Both are resolved dataset-
     // wide BEFORE pagination; `total` uses the same filtered id set.
-    let ids = (await prisma.paciente.findMany({ where: baseWhere, select: { id: true } })).map(p => p.id)
+    let ids = (await prisma.patient.findMany({ where: baseWhere, select: { id: true } })).map(p => p.id)
     if (risk) {
       const latest = await currentPredictionsOfLatestClinicalRecord(ids)
       ids = ids.filter(id => latest.get(id)?.riskLevel === risk)
     }
     const ordered = await orderPatientIdsByLatestClinical(ids)
     const pageIds = ordered.slice(skip, skip + limit)
-    const rows = pageIds.length ? await prisma.paciente.findMany({ where: { id: { in: pageIds } } }) : []
+    const rows = pageIds.length ? await prisma.patient.findMany({ where: { id: { in: pageIds } } }) : []
     const byId = new Map(rows.map(r => [r.id, r]))
     const data = pageIds.map(id => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined)
     return { data, total: ids.length }
@@ -98,9 +98,9 @@ export class PatientRepository {
   // INACTIVE_VISIBLE patient is NOT excluded here — historical information
   // (clinical history, timeline) stays fully accessible for it, per Z8 §25/
   // §33; only hidden patients are walled off at this layer.
-  async findById(id: string, medicoId: string) {
-    return prisma.paciente.findFirst({
-      where: { id, medicoId, isHidden: false },
+  async findById(id: string, doctorId: string) {
+    return prisma.patient.findFirst({
+      where: { id, doctorId, isHidden: false },
       include: {
         predictions: {
           orderBy: { predictedAt: 'desc' },
@@ -118,14 +118,14 @@ export class PatientRepository {
   // patient can never be "shown" through this path, and a wrong-doctor or
   // nonexistent id still resolves to nothing, same NotFoundError contract
   // as every other patient lookup in this module.
-  async findHiddenById(id: string, medicoId: string) {
-    return prisma.paciente.findFirst({ where: { id, medicoId, isHidden: true } })
+  async findHiddenById(id: string, doctorId: string) {
+    return prisma.patient.findFirst({ where: { id, doctorId, isHidden: true } })
   }
 
-  async create(medicoId: string, dto: CreatePatientDtoType) {
-    return prisma.paciente.create({
+  async create(doctorId: string, dto: CreatePatientDtoType) {
+    return prisma.patient.create({
       data: {
-        medicoId,
+        doctorId,
         firstName: dto.firstName,
         lastName:  dto.lastName,
         birthDate: new Date(dto.birthDate),
@@ -150,7 +150,7 @@ export class PatientRepository {
   // doctor explicitly clears them).
   async update(id: string, dto: UpdatePatientDtoType) {
     const { birthDate, ...rest } = dto
-    return prisma.paciente.update({
+    return prisma.patient.update({
       where: { id },
       data: {
         ...rest,
@@ -168,8 +168,8 @@ export class PatientRepository {
   // is reached; this method is the bare, unconditional write.
   // NEW S2D — optional transaction client so a deactivation can supersede
   // the patient's CURRENT forecast set in the SAME transaction.
-  async setActive(id: string, isActive: boolean, client: Pick<Prisma.TransactionClient, 'paciente'> = prisma) {
-    return client.paciente.update({ where: { id }, data: { isActive } })
+  async setActive(id: string, isActive: boolean, client: Pick<Prisma.TransactionClient, 'patient'> = prisma) {
+    return client.patient.update({ where: { id }, data: { isActive } })
   }
 
   // Z8 §10/§11 — one explicit, reversible visibility setter for BOTH
@@ -180,10 +180,10 @@ export class PatientRepository {
   // (owned, exists, current isActive/isHidden state, the
   // PatientMustBeInactiveToHideError business rule) before this is reached.
   async setHidden(id: string, isHidden: boolean) {
-    return prisma.paciente.update({ where: { id }, data: { isHidden } })
+    return prisma.patient.update({ where: { id }, data: { isHidden } })
   }
 
-  // Z8 §19 — bulk visibility. Scoped by this WHERE alone (medicoId +
+  // Z8 §19 — bulk visibility. Scoped by this WHERE alone (doctorId +
   // isActive=false + the CURRENT isHidden value being flipped) — never a
   // two-step "find ids then update", so there is no window where a
   // concurrent change could cause an id collected in step 1 to be
@@ -192,11 +192,11 @@ export class PatientRepository {
   // matching every one of these predicates: an ACTIVE patient is never
   // touched (isActive: false is unconditional here, not merely the
   // "default" case), and another doctor's patients are never touched
-  // (medicoId is always the authenticated doctor's own Medico.id, never
+  // (doctorId is always the authenticated doctor's own Medico.id, never
   // client-suppliable).
-  async bulkSetVisibility(medicoId: string, isHidden: boolean): Promise<number> {
-    const result = await prisma.paciente.updateMany({
-      where: { medicoId, isActive: false, isHidden: !isHidden },
+  async bulkSetVisibility(doctorId: string, isHidden: boolean): Promise<number> {
+    const result = await prisma.patient.updateMany({
+      where: { doctorId, isActive: false, isHidden: !isHidden },
       data:  { isHidden },
     })
     return result.count
@@ -207,15 +207,15 @@ export class PatientRepository {
   // "do not return clinical records/predictions here — this is visibility
   // management, not another PatientDetail implementation" instruction) —
   // just enough fields for a row's name/basic identity + a "Mostrar"
-  // action. Scoped to medicoId + isActive=false + isHidden=true
+  // action. Scoped to doctorId + isActive=false + isHidden=true
   // unconditionally — this is the ONE query in this repository allowed to
   // resolve hidden rows as a *list* (findHiddenById above is the equivalent
   // for a single id).
-  async findHidden(medicoId: string, opts: { page: number; limit: number; search?: string }) {
+  async findHidden(doctorId: string, opts: { page: number; limit: number; search?: string }) {
     const { page, limit, search } = opts
     const skip = (page - 1) * limit
-    const where: Prisma.PacienteWhereInput = {
-      medicoId,
+    const where: Prisma.PatientWhereInput = {
+      doctorId,
       isActive: false,
       isHidden: true,
       ...(search && {
@@ -228,7 +228,7 @@ export class PatientRepository {
     }
 
     const [data, total] = await prisma.$transaction([
-      prisma.paciente.findMany({
+      prisma.patient.findMany({
         where,
         skip,
         take: limit,
@@ -238,7 +238,7 @@ export class PatientRepository {
           curp: true, updatedAt: true,
         },
       }),
-      prisma.paciente.count({ where }),
+      prisma.patient.count({ where }),
     ])
     return { data, total }
   }
@@ -249,10 +249,10 @@ export class PatientRepository {
   // the Z8 brief carves out that exception for (never reused as a Dashboard
   // patient count — see dashboard.repository.ts, which excludes hidden
   // patients from every one of ITS counts instead).
-  async getVisibilitySummary(medicoId: string): Promise<{ visibleInactive: number; hiddenInactive: number }> {
+  async getVisibilitySummary(doctorId: string): Promise<{ visibleInactive: number; hiddenInactive: number }> {
     const [visibleInactive, hiddenInactive] = await Promise.all([
-      prisma.paciente.count({ where: { medicoId, isActive: false, isHidden: false } }),
-      prisma.paciente.count({ where: { medicoId, isActive: false, isHidden: true } }),
+      prisma.patient.count({ where: { doctorId, isActive: false, isHidden: false } }),
+      prisma.patient.count({ where: { doctorId, isActive: false, isHidden: true } }),
     ])
     return { visibleInactive, hiddenInactive }
   }

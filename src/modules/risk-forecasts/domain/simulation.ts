@@ -1,14 +1,14 @@
 // NEW S2B → S3 — S-FEAT-ROBUST-TREND-1 target-state simulation, target dates,
 // admissibility and contiguous horizon truncation. (Supersedes S-FEAT-LOCF-1.)
 //
-// Continuous indicators (totChol, sysBP, diaBP, BMI, heartRate, glucose):
+// Continuous indicators (totChol, sysBP, diaBP, BMI, glucose):
 //   futureValue = anchorValue + effectiveSlope × daysAhead
 // with daysAhead = targetDate − anchor clinical day (integer Guadalajara
 // calendar days). EVERY horizon is computed DIRECTLY from the REAL history
 // trend + REAL anchor + its own target date — never from another horizon's
 // simulated state (no recursive simulation).
-// Only the 12-feature model-input type semantics are applied afterwards
-// (integer fields → round half up). Nothing is clamped: an inadmissible
+// Only the 11-feature model-input type semantics are applied afterwards.
+// Nothing is clamped: an inadmissible
 // state truncates the horizons from that point on.
 // Discrete states are NOT forecast (no invented intervention / state change):
 // age DERIVED from birthDate, sex = patient, currentSmoker / BPMeds /
@@ -31,7 +31,6 @@ import type {
 // The value is first snapped to 9 decimals so a binary-floating residue of an
 // exact half (e.g. 77.49999999999999 for 77.5) still rounds UP.
 export const roundHalfUp = (x: number): number => (Number.isFinite(x) ? Math.floor(Number(x.toFixed(9)) + 0.5) : x)
-const INTEGER_TREND_FEATURES: ReadonlySet<TrendFeature> = new Set<TrendFeature>(['heartRate'])
 
 export function featureProvenanceFor(trends: Readonly<Record<TrendFeature, SFeatureTrend>>): Readonly<Record<keyof SSimulatedState, SFeatureProvenance>> {
   const dyn = (f: TrendFeature): SFeatureProvenance => (trends[f].effectiveSlope === 0 ? 'ROBUST_TREND_FLAT' : 'ROBUST_TREND')
@@ -46,7 +45,6 @@ export function featureProvenanceFor(trends: Readonly<Record<TrendFeature, SFeat
     sysBP:         dyn('sysBP'),
     diaBP:         dyn('diaBP'),
     BMI:           dyn('BMI'),
-    heartRate:     dyn('heartRate'),
     glucose:       dyn('glucose'),
   })
 }
@@ -66,10 +64,7 @@ export function simulateTargetState(
   const cigsForcedZero = smoker === 0 && anchor.cigsPerDay !== 0
   const age = ageOnDate(patient.birthDate, targetDate)
   const daysAhead = calendarDayDiff(anchorDay, targetDate)
-  const future = (f: TrendFeature) => {
-    const v = featureValue(anchor, f) + trends[f].effectiveSlope * daysAhead
-    return INTEGER_TREND_FEATURES.has(f) ? roundHalfUp(v) : v
-  }
+  const future = (f: TrendFeature) => featureValue(anchor, f) + trends[f].effectiveSlope * daysAhead
   const dynamic = Object.fromEntries(TREND_FEATURES.map(f => [f, future(f)])) as Record<TrendFeature, number>
   const state: SSimulatedState = {
     age,
@@ -82,7 +77,6 @@ export function simulateTargetState(
     sysBP:         dynamic.sysBP,
     diaBP:         dynamic.diaBP,
     BMI:           dynamic.BMI,
-    heartRate:     dynamic.heartRate,
     glucose:       dynamic.glucose,
   }
   return { state, flags: { cigsForcedZero, ageChangedFromAnchor: age !== anchor.age } }
@@ -114,7 +108,7 @@ export function planHorizons(
   return { status, reason, targets }
 }
 
-// ═══ NEW S4 — S-FEAT-SEQUENTIAL-ROBUST-1 + S-CAD-3 cumulative target dates ═══
+// ═══ NEW S4 — S-FEAT-SEQUENTIAL-ROBUST-2 + S-CAD-3 cumulative target dates ═══
 //
 //   targetDate(1) = anchorDay + i1, targetDate(2) = targetDate(1) + i2,
 //   targetDate(3) = targetDate(2) + i3        (intervals from S-CAD-3)
@@ -129,14 +123,14 @@ export function planHorizons(
 // enter the context (never a persisted forecast, a Prediction, a risk score,
 // R evidence, or a forecast of another set). A simulated point sits at
 // anchorInstant + days(anchorDay → targetDate) and carries its simulated
-// dynamic feature values (heartRate already integer). The first inadmissible
+// dynamic feature values. The first inadmissible
 // horizon truncates the rest (no clamping, no skipping).
 
 export function seqProvenanceFor(trends: Readonly<Record<TrendFeature, SWeightedFeatureTrend>>): Readonly<Record<keyof SSimulatedState, SFeatureProvenance>> {
   const dyn = (f: TrendFeature): SFeatureProvenance => (trends[f].effectiveSlope === 0 ? 'SEQUENTIAL_ROBUST_FLAT' : 'SEQUENTIAL_ROBUST_TREND')
   return Object.freeze({
     age: 'DERIVED', sex: 'CARRY_FORWARD', currentSmoker: 'CARRY_FORWARD', cigsPerDay: 'CONDITIONAL', BPMeds: 'CARRY_FORWARD', diabetes: 'CARRY_FORWARD',
-    totChol: dyn('totChol'), sysBP: dyn('sysBP'), diaBP: dyn('diaBP'), BMI: dyn('BMI'), heartRate: dyn('heartRate'), glucose: dyn('glucose'),
+    totChol: dyn('totChol'), sysBP: dyn('sysBP'), diaBP: dyn('diaBP'), BMI: dyn('BMI'), glucose: dyn('glucose'),
   })
 }
 

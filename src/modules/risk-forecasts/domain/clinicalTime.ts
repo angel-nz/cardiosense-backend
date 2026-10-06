@@ -1,7 +1,8 @@
 // NEW S2B — S-TIME-1: REAL clinical ordering and pure calendar arithmetic.
 //
-// S-only. R stays frozen on its own recordedAt (entry-time) semantics; this
-// module never touches R code or R evidence.
+// S-only effective-time policy. R-BPBC-3 also uses measuredAt as its causal
+// clock, but unlike S it NEVER falls back to recordedAt for legacy rows. This
+// module remains S-only because its LEGACY_ENTRY_TIME fallback is forbidden in R.
 
 import { clinicalDayOf } from '@/lib/timezone'
 import { SInputContractError, type SRealRecordInput } from './types'

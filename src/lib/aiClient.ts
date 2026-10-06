@@ -34,7 +34,6 @@ function buildFeatures(record: HealthRecord, sex: number) {
     sysBP:         Number(record.sysBP),
     diaBP:         Number(record.diaBP),
     BMI:           Number(record.bmi),
-    heartRate:     record.heartRate,
     glucose:       Number(record.glucose),
   }
 }
@@ -75,7 +74,7 @@ export async function callAIPredict(
     const mapped = mapAIError(err)
     logger.error('AI service error', { ...describeAIError(err), mappedCode: mapped.code })
     // Q2-FIX: no mock/heuristic fallback of any kind, in any environment.
-    // CardioSense has a real inference service (Skorp-Beta-0.1) — an
+    // CardioSense has a real inference service (Skorp-Beta-0.2) — an
     // unreachable/failing AI Service is a genuine inference failure, not a
     // condition to silently paper over with a fabricated risk score. The
     // previous dev-mode fallback here is exactly what caused a mock

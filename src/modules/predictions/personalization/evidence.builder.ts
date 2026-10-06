@@ -1,5 +1,5 @@
 // NEW R (R4B) — PURE causal-evidence builder (no I/O, no Prisma client, no
-// clock). Implements the frozen R3 / R3-FIX1 / R3-FIX2 evidence policy for one
+// clock). Implements the R-BPBC-3 evidence policy for one
 // authorized patient and one anchor HealthRecord:
 //
 //   prior HealthRecords (already patient-scoped + causally cut by the repo)
@@ -15,8 +15,9 @@
 // It computes NO latent state, γ, gradient, conditioned input or risk — those
 // belong to the AI service (R4C). It never decides a personalization status.
 //
-// Determinism: the result depends only on recordedAt / predictedAt / clinical
-// values / scores. UUIDs never drive ordering or selection; they appear only
+// Determinism: the result depends only on measuredAt / clinical values /
+// GLOBAL scores. recordedAt and predictedAt never drive R chronology. UUIDs
+// never drive ordering or selection; they appear only
 // as provenance identifiers inside the fingerprint (sorted for serialization).
 import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
@@ -29,10 +30,11 @@ type DecimalLike = Prisma.Decimal | number | string
 
 // ─── Input shapes (exactly what the scoped repositories select) ────────────
 export interface EvidenceRecordRow {
-  id:            string
-  patientId:     string
-  recordedAt:    Date
-  age:           number
+  id:                 string
+  patientId:          string
+  measuredAt:         Date | null
+  clinicalTimeSource: 'CLINICIAN_ENTERED' | 'LEGACY_ENTRY_TIME'
+  age:                number
   currentSmoker: boolean
   cigsPerDay:    number
   bpMeds:        boolean
@@ -41,7 +43,6 @@ export interface EvidenceRecordRow {
   sysBP:         DecimalLike
   diaBP:         DecimalLike
   bmi:           DecimalLike
-  heartRate:     number
   glucose:       DecimalLike
 }
 
@@ -54,7 +55,6 @@ export interface EvidencePredictionRow {
   personalizationStatus: string | null   // NULL ⇒ legacy / pre-NEW-R row
   modelVersion:          string | null
   sexUsed:               number | null
-  predictedAt:           Date
 }
 
 export interface BuildEvidenceInput {
@@ -69,7 +69,7 @@ export interface BuildEvidenceInput {
 // ─── Output shapes ─────────────────────────────────────────────────────────
 // Conditioned-feature observation (R3 item 7: sysBP, diaBP, totChol, glucose).
 export interface EvidenceState {
-  tDays:   number   // (recordedAt − anchor.recordedAt) / 1 day  → negative
+  tDays:   number   // (measuredAt − anchor.measuredAt) / 1 day  → negative
   sysBP:   number
   diaBP:   number
   totChol: number
@@ -84,12 +84,11 @@ export interface EvidencePiState {
   BPMeds:        0 | 1
   diabetes:      0 | 1
   BMI:           number
-  heartRate:     number
   sexUsed:       0 | 1 | null   // NULL = legacy / unknown provenance; never substituted
 }
 
 export interface EvidenceUnit {
-  tDays:   number                  // unit time = latest member recordedAt, relative to anchor
+  tDays:   number                  // unit time = latest member measuredAt, relative to anchor
   states:  EvidenceState[]         // distinct states, real time order; m_b = states.length
   pi:      { score: number; scoreBp: number } | null   // canonical GLOBAL score (4-dp, basis points)
   piState: EvidencePiState | null
@@ -101,6 +100,7 @@ export interface EvidenceCounts {
   clinical: {
     rawRecords:                 number
     droppedOutOfScope:          number   // defensive; repositories already scope (expected 0)
+    excludedUnmeasuredClinicalTime: number
     excludedInvalid:            number
     excludedOutOfDomain:        number
     excludedAmbiguousTimestamp: number
@@ -123,7 +123,7 @@ export interface EvidenceCounts {
 export interface PersonalizationEvidence {
   personalizationVersion: typeof PERSONALIZATION_VERSION
   globalModelVersion:     string
-  anchor:                 { recordId: string; recordedAtMs: number }
+  anchor:                 { recordId: string; measuredAtMs: number }
   units:                  EvidenceUnit[]
   counts:                 EvidenceCounts
   evidenceFingerprint:    string
@@ -145,12 +145,12 @@ export function scoreToBasisPoints(v: DecimalLike): number | null {
   return bp.isInteger() ? bp.toNumber() : null
 }
 
-// Model-relevant equality vector: the 11 clinical fields of a HealthRecord
-// (the global input minus patient-level sex). Notes and ids never participate.
+// Model-relevant equality vector: the 10 HealthRecord-derived model fields
+// (the 11-input global contract minus patient-level sex). Notes and ids never participate.
 export function clinicalStateKey(r: EvidenceRecordRow): string {
   return [
     r.age, r.currentSmoker ? 1 : 0, r.cigsPerDay, r.bpMeds ? 1 : 0, r.diabetes ? 1 : 0,
-    fixed2(r.totChol), fixed2(r.sysBP), fixed2(r.diaBP), fixed2(r.bmi), r.heartRate, fixed2(r.glucose),
+    fixed2(r.totChol), fixed2(r.sysBP), fixed2(r.diaBP), fixed2(r.bmi), fixed2(r.glucose),
   ].join('|')
 }
 
@@ -164,9 +164,17 @@ function isValidModelInput(r: EvidenceRecordRow): boolean {
     age: r.age, currentSmoker: r.currentSmoker, cigsPerDay: r.cigsPerDay,
     bpMeds: r.bpMeds, diabetes: r.diabetes,
     totChol: num2(r.totChol), sysBP: num2(r.sysBP), diaBP: num2(r.diaBP),
-    bmi: num2(r.bmi), heartRate: r.heartRate, glucose: num2(r.glucose),
+    bmi: num2(r.bmi), glucose: num2(r.glucose),
   })
   return parsed.success && dec(r.diaBP).lessThan(dec(r.sysBP))
+}
+
+// R-BPBC-3 clinical clock. There is deliberately NO measuredAt → recordedAt
+// fallback. LEGACY_ENTRY_TIME and malformed CLINICIAN_ENTERED rows are not
+// temporal evidence for R.
+function measuredClinicalTime(r: EvidenceRecordRow): Date | null {
+  if (r.clinicalTimeSource !== 'CLINICIAN_ENTERED' || !(r.measuredAt instanceof Date)) return null
+  return Number.isFinite(r.measuredAt.getTime()) ? r.measuredAt : null
 }
 
 // A same-timestamp group of identical-state records = one effective candidate.
@@ -179,12 +187,15 @@ interface Candidate {
 // ─── Builder ───────────────────────────────────────────────────────────────
 export function buildPersonalizationEvidence(input: BuildEvidenceInput): PersonalizationEvidence {
   const { patientId, anchor, globalModelVersion, eligibleAgeRange } = input
-  const anchorMs = anchor.recordedAt.getTime()
+  const anchorTime = measuredClinicalTime(anchor)
+  if (anchorTime === null) throw new Error('Personalization evidence: anchor lacks valid measured clinical time')
+  const anchorMs = anchorTime.getTime()
   const anchorKey = clinicalStateKey(anchor)
 
   const counts: EvidenceCounts = {
     clinical: {
-      rawRecords: 0, droppedOutOfScope: 0, excludedInvalid: 0, excludedOutOfDomain: 0,
+      rawRecords: 0, droppedOutOfScope: 0, excludedUnmeasuredClinicalTime: 0,
+      excludedInvalid: 0, excludedOutOfDomain: 0,
       excludedAmbiguousTimestamp: 0, excludedDuplicateOfAnchor: 0, sameTimestampCollapsed: 0,
       burstCollapsedDuplicates: 0, effectiveUnits: 0,
     },
@@ -194,32 +205,44 @@ export function buildPersonalizationEvidence(input: BuildEvidenceInput): Persona
     },
   }
 
-  // 1. Causal scope (defense in depth; the repository already applies it).
-  const scoped: EvidenceRecordRow[] = []
+  // 1. Causal scope. Patient identity is checked first; then measuredAt is the
+  // ONLY time axis. NULL/legacy time is explicitly excluded, equality is not
+  // prior, and clinical-future rows are rejected. recordedAt is not consulted.
+  const scoped: Array<{ row: EvidenceRecordRow; timeMs: number }> = []
   for (const r of input.priorRecords) {
-    if (r.patientId !== patientId || r.id === anchor.id || !(r.recordedAt.getTime() < anchorMs)) {
+    if (r.patientId !== patientId || r.id === anchor.id) {
       counts.clinical.droppedOutOfScope++
       continue
     }
-    scoped.push(r)
+    counts.clinical.rawRecords++
+    const t = measuredClinicalTime(r)
+    if (t === null) {
+      counts.clinical.excludedUnmeasuredClinicalTime++
+      continue
+    }
+    const timeMs = t.getTime()
+    if (!(timeMs < anchorMs)) {
+      counts.clinical.droppedOutOfScope++
+      continue
+    }
+    scoped.push({ row: r, timeMs })
   }
-  counts.clinical.rawRecords = scoped.length
 
   // 2. Validity, then model domain.
-  const valid: EvidenceRecordRow[] = []
-  for (const r of scoped) {
+  const valid: Array<{ row: EvidenceRecordRow; timeMs: number }> = []
+  for (const item of scoped) {
+    const r = item.row
     if (!isValidModelInput(r)) { counts.clinical.excludedInvalid++; continue }
     if (r.age < eligibleAgeRange.min || r.age > eligibleAgeRange.max) { counts.clinical.excludedOutOfDomain++; continue }
-    valid.push(r)
+    valid.push(item)
   }
 
   // 3. Same-timestamp policy: identical ⇒ one candidate; conflicting ⇒ the
   //    whole timestamp group is AMBIGUOUS_TIMESTAMP (never pick or average).
   const byTime = new Map<number, EvidenceRecordRow[]>()
-  for (const r of valid) {
-    const t = r.recordedAt.getTime()
-    const g = byTime.get(t)
-    if (g) g.push(r); else byTime.set(t, [r])
+  for (const { row, timeMs } of valid) {
+    const g = byTime.get(timeMs)
+    if (g) g.push(row); else byTime.set(timeMs, [row])
   }
   let candidates: Candidate[] = []
   for (const [timeMs, group] of byTime) {
@@ -253,7 +276,7 @@ export function buildPersonalizationEvidence(input: BuildEvidenceInput): Persona
   for (const b of bursts) for (const c of b) for (const r of c.records) survivingRecordIds.add(r.id)
   const predsByRecord = new Map<string, Array<{ row: EvidencePredictionRow; bp: number }>>()
   for (const p of input.predictions) {
-    if (p.patientId !== patientId || p.healthRecordId === null || !(p.predictedAt.getTime() < anchorMs)) {
+    if (p.patientId !== patientId || p.healthRecordId === null) {
       counts.prediction.droppedOutOfScope++
       continue
     }
@@ -306,7 +329,7 @@ export function buildPersonalizationEvidence(input: BuildEvidenceInput): Persona
       piState = {
         age: r.age, currentSmoker: r.currentSmoker ? 1 : 0, cigsPerDay: r.cigsPerDay,
         BPMeds: r.bpMeds ? 1 : 0, diabetes: r.diabetes ? 1 : 0,
-        BMI: num2(r.bmi), heartRate: r.heartRate, sexUsed,
+        BMI: num2(r.bmi), sexUsed,
       }
       piPredictionIds = rows.map(x => x.row.id).sort()
       break
@@ -327,7 +350,7 @@ export function buildPersonalizationEvidence(input: BuildEvidenceInput): Persona
   return {
     personalizationVersion: PERSONALIZATION_VERSION,
     globalModelVersion,
-    anchor: { recordId: anchor.id, recordedAtMs: anchorMs },
+    anchor: { recordId: anchor.id, measuredAtMs: anchorMs },
     units,
     counts,
     evidenceFingerprint: evidenceFingerprint(anchor, globalModelVersion, units),
@@ -336,14 +359,16 @@ export function buildPersonalizationEvidence(input: BuildEvidenceInput): Persona
 
 // SHA-256 over a canonical serialization of the evidence actually used:
 // policy version, global model version, anchor id + cutoff, and per unit (in
-// real time order) its sorted member record ids and, if any, the π basis
+// measured-time order) its sorted member record ids and, if any, the π basis
 // points + sorted contributing prediction ids. Ids are provenance only.
 export function evidenceFingerprint(anchor: EvidenceRecordRow, globalModelVersion: string, units: EvidenceUnit[]): string {
+  const anchorTime = measuredClinicalTime(anchor)
+  if (anchorTime === null) throw new Error('Personalization evidence fingerprint: anchor lacks valid measured clinical time')
   const canonical = JSON.stringify({
     policy: PERSONALIZATION_VERSION,
     globalModelVersion,
     anchorRecordId: anchor.id,
-    cutoff: anchor.recordedAt.toISOString(),
+    cutoff: anchorTime.toISOString(),
     units: units.map(u => ({
       records: u.source.recordIds,
       pi: u.pi ? { bp: u.pi.scoreBp, predictions: u.source.piPredictionIds } : null,

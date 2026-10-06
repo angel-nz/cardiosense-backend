@@ -33,10 +33,13 @@ export class PersonalizationEvidenceService {
       // Unreachable through R1.5-scoped anchor resolution; fail closed.
       throw new Error('Personalization evidence: anchor does not belong to the authorized patient')
     }
-    const cutoff = anchor.recordedAt
-    const priorRecords = await this.records.findPriorRecordsForPatient(patient.id, cutoff)
+    const cutoff = anchor.measuredAt
+    if (anchor.clinicalTimeSource !== 'CLINICIAN_ENTERED' || !(cutoff instanceof Date) || !Number.isFinite(cutoff.getTime())) {
+      throw new Error('Personalization evidence: anchor lacks valid measured clinical time')
+    }
+    const priorRecords = await this.records.findPriorRecordsForPatient(patient.id, anchor.id, cutoff)
     const predictions = await this.predictions.findGlobalPredictionsForRecords(
-      patient.id, priorRecords.map(r => r.id), cutoff,
+      patient.id, priorRecords.map(r => r.id),
     )
     return buildPersonalizationEvidence({
       patientId: patient.id,

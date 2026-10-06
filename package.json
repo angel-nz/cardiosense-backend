@@ -10,10 +10,15 @@
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:seed": "ts-node prisma/seed.ts",
+    "prisma:seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
     "prisma:studio": "prisma studio",
     "forecast:bootstrap": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/forecast-bootstrap.ts",
-    "prediction:reconcile": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/prediction-reconcile.ts"
+    "prediction:reconcile": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/prediction-reconcile.ts",
+    "test:pre-t-r1": "ts-node --transpile-only -r tsconfig-paths/register src/scripts/pre-t-r1-harness.ts",
+    "test:pre-t-ux1": "node scripts/test-pre-t-ux1.cjs",
+    "demo:seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
+    "demo:reset": "node scripts/commercial-demo-reset.cjs",
+    "test:post-t-db1": "node scripts/test-post-t-db1.cjs"
   },
   "dependencies": {
     "@prisma/client": "^5.16.0",

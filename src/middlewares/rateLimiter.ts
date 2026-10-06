@@ -1,11 +1,43 @@
 import rateLimit from 'express-rate-limit'
+import type { Request } from 'express'
 import type { AuthRequest } from '@/types'
+import { verifyAccessToken } from '@/lib/jwt'
+
+export const GENERAL_API_WINDOW_MS = 15 * 60 * 1000
+export const GENERAL_API_MAX = 2000
+
+// INTEGRITY-1A — the general application limiter is mounted before route-level
+// `authenticate`, so req.user is not available here. We intentionally perform
+// ONLY cryptographic access-token verification to choose a quota key. This does
+// not authorize the request and does not query the session table; canonical
+// authorization remains the responsibility of the existing authenticate
+// middleware on protected routes.
+export function generalApiRateLimitKey(req: Request): string {
+  const authHeader = req.headers.authorization
+
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.slice('Bearer '.length).trim()
+    if (token) {
+      try {
+        const payload = verifyAccessToken(token)
+        if (payload.sub) return `user:${payload.sub}`
+      } catch {
+        // Missing/expired/invalid credentials must never bypass the general
+        // limiter or turn key selection into a server error. Authorization is
+        // evaluated later by the canonical auth middleware.
+      }
+    }
+  }
+
+  return `ip:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`
+}
 
 export const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: GENERAL_API_WINDOW_MS,
+  max: GENERAL_API_MAX,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: generalApiRateLimitKey,
   message: { error: 'Too many requests, please try again later.', code: 'RATE_LIMITED' },
 })
 
@@ -40,11 +72,10 @@ export const passwordChangeLimiter = rateLimit({
 // Y3.1B — POST /users/me/avatar only (decode + normalize + encode + a
 // binary DB write — the one genuinely expensive avatar operation; GET/DELETE
 // stay under the ordinary blanket apiLimiter, same as every other
-// lightweight /me/* route). Verified this block: none of the three limiters
-// above define their own `keyGenerator`, so they all fall back to
-// express-rate-limit v7's default — IP-based — keying; that is fine for
-// login/register/password-change, which must also throttle an UNauthenticated
-// or not-yet-verified caller by IP. This route is different: it sits behind
+// lightweight /me/* route). The dedicated auth/password limiters above remain
+// IP-based because they protect credential-verification surfaces. The general
+// apiLimiter now has its own INTEGRITY-1A user-aware keying, but that does not
+// change this route's dedicated protection. This route sits behind
 // `authenticate` in every mounting (see user.routes.ts route order), so
 // `req.user` is always populated by the time this limiter runs, and keying
 // by IP here would incorrectly lump every authenticated user behind the same

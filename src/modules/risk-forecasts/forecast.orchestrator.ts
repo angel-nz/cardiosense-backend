@@ -35,14 +35,14 @@ type Client = typeof prisma | repo.Tx
 const RECORD_SELECT = {
   id: true, recordedAt: true, measuredAt: true, clinicalTimeSource: true, age: true, currentSmoker: true,
   cigsPerDay: true, bpMeds: true, diabetes: true, totChol: true, sysBP: true, diaBP: true, bmi: true,
-  heartRate: true, glucose: true,
+  glucose: true,
 } as const
 
 interface Inputs { patient: SPatientInput; records: SRealRecordInput[] }
 
 async function loadInputs(patientId: string, client: Client): Promise<Inputs | null> {
   const c = client as repo.Tx
-  const p = await c.paciente.findUnique({ where: { id: patientId }, select: { id: true, birthDate: true, sex: true, isActive: true, isHidden: true } })
+  const p = await c.patient.findUnique({ where: { id: patientId }, select: { id: true, birthDate: true, sex: true, isActive: true, isHidden: true } })
   if (!p) return null
   const recs = await c.healthRecord.findMany({ where: { patientId }, select: RECORD_SELECT })
   return {
@@ -280,7 +280,7 @@ export async function supersedeCurrentForLifecycleInTx(tx: repo.Tx, patientId: s
 async function runLifecycleSupersession(patientId: string, io?: IOServer): Promise<{ supersededSetId: string | null; reason: ForecastSupersedeReason | null }> {
   const res = await prisma.$transaction(async tx => {
     await repo.lockPatientForecasts(tx, patientId)
-    const p = await tx.paciente.findUnique({ where: { id: patientId }, select: { isActive: true, isHidden: true } })
+    const p = await tx.patient.findUnique({ where: { id: patientId }, select: { isActive: true, isHidden: true } })
     if (!p || (p.isActive && !p.isHidden)) return { supersededSetId: null, reason: null }
     const reason = lifecycleSupersedeReason(p)
     const current = await repo.findCurrentSet(patientId, tx)
@@ -312,9 +312,9 @@ export async function reconcileLifecycleForPatients(patientIds: string[], io?: I
   return n
 }
 
-export async function reconcileLifecycleForMedico(medicoId: string, io?: IOServer): Promise<number> {
+export async function reconcileLifecycleForDoctor(doctorId: string, io?: IOServer): Promise<number> {
   const rows = await prisma.riskForecastSet.findMany({
-    where: { currentForPatientId: { not: null }, patient: { medicoId, OR: [{ isActive: false }, { isHidden: true }] } },
+    where: { currentForPatientId: { not: null }, patient: { doctorId, OR: [{ isActive: false }, { isHidden: true }] } },
     select: { patientId: true },
   })
   return reconcileLifecycleForPatients(rows.map(r => r.patientId), io)

@@ -2,16 +2,16 @@ import { prisma } from '@/config/prisma'
 import { Prisma } from '@prisma/client'
 
 export class DashboardRepository {
-  // I1 — count only; scoping (patient.medicoId) applied inside Prisma, not
+  // I1 — count only; scoping (patient.doctorId) applied inside Prisma, not
   // in application code.
   // Z8 §31 — isHidden=false added: a hidden patient must not contribute to
   // any normal operational Dashboard metric. No current metric is defined
   // as "ACTIVE patients only" (confirmed by audit of dashboard.service.ts
   // before this change), so no additional isActive predicate is added here.
-  async countPredictionsInRange(medicoId: string, start: Date, end: Date): Promise<number> {
+  async countPredictionsInRange(doctorId: string, start: Date, end: Date): Promise<number> {
     return prisma.prediction.count({
       where: {
-        patient: { medicoId, isHidden: false },
+        patient: { doctorId, isHidden: false },
         predictedAt: { gte: start, lt: end },
       },
     })
@@ -20,10 +20,10 @@ export class DashboardRepository {
   // I3 — only the timestamp is selected; bucketing by local day happens in
   // the service, over a dataset already bounded to one médico's one week.
   // Z8 §31 — isHidden=false added, same exclusion as above.
-  async findPredictedAtInRange(medicoId: string, start: Date, end: Date): Promise<Array<{ predictedAt: Date }>> {
+  async findPredictedAtInRange(doctorId: string, start: Date, end: Date): Promise<Array<{ predictedAt: Date }>> {
     return prisma.prediction.findMany({
       where: {
-        patient: { medicoId, isHidden: false },
+        patient: { doctorId, isHidden: false },
         predictedAt: { gte: start, lt: end },
       },
       select: { predictedAt: true },
@@ -35,7 +35,7 @@ export class DashboardRepository {
   // is resolved ONLY by clinicalLatest.ts::currentPredictionsOfLatestClinicalRecord.
 
   // ─── O2 — Dashboard Calendar ──────────────────────────────────────────
-  // All four queries below apply `medicoId` directly inside Prisma (never
+  // All four queries below apply `doctorId` directly inside Prisma (never
   // "fetch all, filter in application code") and are independent of each
   // other except for the predecessor query, which needs the patientIds
   // found by findPredictionsInRange first (see dashboard.service.ts).
@@ -45,17 +45,17 @@ export class DashboardRepository {
   // Z8 §31/§32 — isHidden=false added: a hidden patient's identity must
   // never decorate a calendar event (no clickable event leading to an
   // inaccessible hidden patient).
-  async findPatientIdentities(medicoId: string): Promise<Array<{ id: string; firstName: string; lastName: string }>> {
-    return prisma.paciente.findMany({
-      where: { medicoId, isHidden: false },
+  async findPatientIdentities(doctorId: string): Promise<Array<{ id: string; firstName: string; lastName: string }>> {
+    return prisma.patient.findMany({
+      where: { doctorId, isHidden: false },
       select: { id: true, firstName: true, lastName: true },
     })
   }
 
   // O2.8 — CLINICAL_RECORD source. Same [from, to) + asc/id-tie-break
   // pattern as patient.timeline's record.repository.ts::findInRange, but
-  // scoped by medicoId across all patients instead of a single patientId.
-  async findRecordsInRange(medicoId: string, from?: Date, to?: Date): Promise<Array<{
+  // scoped by doctorId across all patients instead of a single patientId.
+  async findRecordsInRange(doctorId: string, from?: Date, to?: Date): Promise<Array<{
     id: string
     patientId: string
     recordedAt: Date
@@ -66,7 +66,7 @@ export class DashboardRepository {
       where: {
         // Z8 §31/§32 — isHidden=false added: no CLINICAL_RECORD calendar
         // event for a hidden patient.
-        patient: { medicoId, isHidden: false },
+        patient: { doctorId, isHidden: false },
         ...(from || to ? {
           recordedAt: {
             ...(from ? { gte: from } : {}),
@@ -80,7 +80,7 @@ export class DashboardRepository {
 
   // O2.9 — PREDICTION source, also the basis for `relevantPatientIds`
   // (dashboard.service.ts) used to scope the predecessor query below.
-  async findPredictionsInRange(medicoId: string, from?: Date, to?: Date): Promise<Array<{
+  async findPredictionsInRange(doctorId: string, from?: Date, to?: Date): Promise<Array<{
     id: string
     patientId: string
     healthRecordId: string | null
@@ -96,7 +96,7 @@ export class DashboardRepository {
         // Z8 §31/§32 — isHidden=false added: no PREDICTION calendar event
         // (and, downstream, no RISK_CHANGE derivation) for a hidden
         // patient.
-        patient: { medicoId, isHidden: false },
+        patient: { doctorId, isHidden: false },
         ...(from || to ? {
           predictedAt: {
             ...(from ? { gte: from } : {}),
@@ -115,8 +115,8 @@ export class DashboardRepository {
 
   // O2.11 — predecessor query. Real column/table names confirmed from
   // schema.prisma: table `predictions` (patient_id, predicted_at,
-  // risk_level), table `pacientes` (medico_id). $queryRaw with a tagged
-  // template — Prisma binds `medicoId`/`patientIds`/`from` as real query
+  // risk_level), table `pacientes` (doctor_id). $queryRaw with a tagged
+  // template — Prisma binds `doctorId`/`patientIds`/`from` as real query
   // parameters, never string-concatenated (never $queryRawUnsafe).
   //
   // Per O1-FIX: NOT Prisma Client's `distinct` (that fetches/processes
@@ -128,7 +128,7 @@ export class DashboardRepository {
   // dashboard.service.ts, which skips this query entirely when there are
   // no relevant patients — section 17).
   //
-  // Ownership is re-verified INSIDE this query (`pa.medico_id = ${medicoId}`
+  // Ownership is re-verified INSIDE this query (`pa.doctor_id = ${doctorId}`
   // via the join) rather than trusting that the caller's `patientIds` list
   // was already safely scoped — defense in depth, matching how every other
   // query in this codebase re-applies its own scoping rather than relying
@@ -151,7 +151,7 @@ export class DashboardRepository {
   // each parameter typed by its own JS value (string), with no array-typing
   // ambiguity at all.
   async findPredecessors(
-    medicoId: string,
+    doctorId: string,
     patientIds: string[],
     before: Date,
   ): Promise<Array<{ id: string; patientId: string; predictedAt: Date; riskLevel: string }>> {
@@ -163,7 +163,7 @@ export class DashboardRepository {
         p.predicted_at AS "predictedAt",
         p.risk_level AS "riskLevel"
       FROM predictions p
-      JOIN pacientes pa ON pa.id = p.patient_id AND pa.medico_id = ${medicoId} AND pa.is_hidden = false
+      JOIN patients pa ON pa.id = p.patient_id AND pa.doctor_id = ${doctorId} AND pa.is_hidden = false
       WHERE p.patient_id IN (${Prisma.join(patientIds)})
         AND p.predicted_at < ${before}
       ORDER BY p.patient_id, p.predicted_at DESC, p.id DESC

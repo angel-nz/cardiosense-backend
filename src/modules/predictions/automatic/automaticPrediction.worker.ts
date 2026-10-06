@@ -183,7 +183,7 @@ export class AutomaticPredictionWorker {
 
   async process(task: ClaimedTask): Promise<AutoTaskOutcome> {
     const record = await prisma.healthRecord.findUnique({ where: { id: task.healthRecordId }, select: { id: true, patientId: true } })
-    const patient = await prisma.paciente.findUnique({ where: { id: task.patientId }, include: { medico: { select: { userId: true } } } })
+    const patient = await prisma.patient.findUnique({ where: { id: task.patientId }, include: { doctor: { select: { userId: true } } } })
 
     // 1. Exactly-once convergence of the BUSINESS rows: the record's AUTO
     //    Prediction may already exist (crash after COMMIT, lost lease, racing
@@ -203,7 +203,7 @@ export class AutomaticPredictionWorker {
     if (!fullRecord) return this.block(task, 'RECORD_NOT_FOUND', null)
 
     try {
-      const prediction = await new PredictionService(this.io).scoreAndPersistAutomatic({ patient, record: fullRecord, medicoUserId: patient.medico.userId })
+      const prediction = await new PredictionService(this.io).scoreAndPersistAutomatic({ patient, record: fullRecord, doctorUserId: patient.doctor.userId })
       // Reached only after the S2C-FIX1 post-COMMIT verification AND the
       // post-COMMIT finalizer succeeded.
       return (await this.complete(task, prediction.id)) ? 'COMPLETED' : 'LEASE_LOST'
@@ -214,31 +214,31 @@ export class AutomaticPredictionWorker {
         })
         if (winner) return this.finalizeExisting(task, winner.id, patient)
       }
-      return this.handleFailure(task, err, patient.medico.userId)
+      return this.handleFailure(task, err, patient.doctor.userId)
     }
   }
 
   private async finalizeExisting(
     task: ClaimedTask, predictionId: string,
-    patient: { id: string; firstName: string; lastName: string; medico: { userId: string } },
+    patient: { id: string; firstName: string; lastName: string; doctor: { userId: string } },
   ): Promise<AutoTaskOutcome> {
     try {
       await new PredictionService(this.io).finalizeExistingAutomaticPrediction({
         patient: { id: patient.id, firstName: patient.firstName, lastName: patient.lastName },
-        healthRecordId: task.healthRecordId, predictionId, medicoUserId: patient.medico.userId,
+        healthRecordId: task.healthRecordId, predictionId, doctorUserId: patient.doctor.userId,
       })
     } catch (err) {
       // A finalizer failure never calls the AI again: the retry lands here again.
-      if (err instanceof AutomaticPredictionMismatchError) return this.handleFailure(task, err, patient.medico.userId)
-      return this.handleFailure(task, new AutomaticFinalizationError(predictionId, err instanceof Error ? err.name : typeof err), patient.medico.userId)
+      if (err instanceof AutomaticPredictionMismatchError) return this.handleFailure(task, err, patient.doctor.userId)
+      return this.handleFailure(task, new AutomaticFinalizationError(predictionId, err instanceof Error ? err.name : typeof err), patient.doctor.userId)
     }
     return (await this.complete(task, predictionId)) ? 'RECONCILED_EXISTING' : 'LEASE_LOST'
   }
 
-  private async handleFailure(task: ClaimedTask, err: unknown, medicoUserId: string): Promise<AutoTaskOutcome> {
+  private async handleFailure(task: ClaimedTask, err: unknown, doctorUserId: string): Promise<AutoTaskOutcome> {
     const { code, kind } = classifyAutoTaskError(err)
-    if (kind === 'BLOCK') return this.block(task, code, err, medicoUserId)
-    return this.retry(task, code, medicoUserId)
+    if (kind === 'BLOCK') return this.block(task, code, err, doctorUserId)
+    return this.retry(task, code, doctorUserId)
   }
 
   // ── owner-guarded state transitions ───────────────────────────────────
@@ -254,7 +254,7 @@ export class AutomaticPredictionWorker {
     return n === 1
   }
 
-  private async retry(task: ClaimedTask, code: AutoTaskErrorCode, medicoUserId: string): Promise<AutoTaskOutcome> {
+  private async retry(task: ClaimedTask, code: AutoTaskErrorCode, doctorUserId: string): Promise<AutoTaskOutcome> {
     const now = new Date()
     const next = new Date(now.getTime() + autoTaskBackoffMs(task.attemptCount))
     const n = await prisma.$executeRaw`
@@ -271,7 +271,7 @@ export class AutomaticPredictionWorker {
     // lets an open PatientDetail refetch its pending/retrying state.
     const reason = code === 'AI_UNAVAILABLE' ? 'AI_UNAVAILABLE' : code === 'AI_INPUT_REJECTED' ? 'AI_INPUT_REJECTED' : code === 'AI_FAILURE' ? 'AI_FAILURE' : null
     if (reason) {
-      try { this.io?.to(`user:${medicoUserId}`).emit('prediction_failed', { patientId: task.patientId, healthRecordId: task.healthRecordId, reason }) } catch { /* best effort */ }
+      try { this.io?.to(`user:${doctorUserId}`).emit('prediction_failed', { patientId: task.patientId, healthRecordId: task.healthRecordId, reason }) } catch { /* best effort */ }
     }
     return 'RETRY_WAIT'
   }
@@ -279,7 +279,7 @@ export class AutomaticPredictionWorker {
   // Terminal outcomes: MODEL_INELIGIBLE (NEW S4-FIX2, business/model-domain)
   // and genuine data invariants. next_attempt_at = NULL: a BLOCKED task is
   // never claimable, whatever the clock or the model version says.
-  private async block(task: ClaimedTask, code: AutoTaskErrorCode, err: unknown, medicoUserId?: string): Promise<AutoTaskOutcome> {
+  private async block(task: ClaimedTask, code: AutoTaskErrorCode, err: unknown, doctorUserId?: string): Promise<AutoTaskOutcome> {
     const now = new Date()
     const n = await prisma.$executeRaw`
       UPDATE automatic_prediction_tasks
@@ -293,9 +293,9 @@ export class AutomaticPredictionWorker {
         taskId: task.id, healthRecordId: task.healthRecordId, modelVersion: e?.modelVersion,
       })
       // Emitted ONCE, on the transition (never re-emitted: the task is not claimable again).
-      if (medicoUserId) {
+      if (doctorUserId) {
         try {
-          this.io?.to(`user:${medicoUserId}`).emit('prediction_unavailable', {
+          this.io?.to(`user:${doctorUserId}`).emit('prediction_unavailable', {
             patientId: task.patientId, healthRecordId: task.healthRecordId, reason: 'MODEL_INELIGIBLE',
             modelVersion: e?.modelVersion, eligibleAgeRange: e?.eligibleAgeRange,
           })

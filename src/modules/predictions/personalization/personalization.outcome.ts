@@ -190,7 +190,7 @@ export type PersonalizationProvenance = {
   reasonOrigin:           'AI' | 'BACKEND' | null
   globalModelVersion:     string                 // AI top-level model_version of THIS prediction
   evidence: {
-    cutoff:              string                  // anchor recordedAt (ISO-8601 UTC); causal cutoff
+    cutoff:              string | null           // anchor measuredAt (ISO-8601 UTC); NULL when no clinical clock
     policyModelVersion:  string | null           // global model version R4B selected π with
     evidenceFingerprint: string | null           // exact R4B SHA-256 (null if extraction failed)
     counts:              ProvenanceCounts | null // R4B counts by stable reason (null if extraction failed)
@@ -227,7 +227,7 @@ export interface PersonalizationOutcome {
 
 export interface ResolveOutcomeInput {
   global:            GlobalAIResult
-  anchorRecordedAt:  Date
+  anchorMeasuredAt:  Date | null
   // R4B result, or null when extraction failed (then NO block was sent).
   evidence:          PersonalizationEvidence | null
   // The raw AI `personalization` value (undefined when the key was absent).
@@ -237,7 +237,8 @@ export interface ResolveOutcomeInput {
 export function resolvePersonalizationOutcome(input: ResolveOutcomeInput): PersonalizationOutcome {
   const { global, evidence } = input
   const evidenceProv: PersonalizationProvenance['evidence'] = {
-    cutoff:              input.anchorRecordedAt.toISOString(),
+    cutoff:              input.anchorMeasuredAt instanceof Date && Number.isFinite(input.anchorMeasuredAt.getTime())
+      ? input.anchorMeasuredAt.toISOString() : null,
     policyModelVersion:  evidence ? evidence.globalModelVersion : null,
     evidenceFingerprint: evidence ? evidence.evidenceFingerprint : null,
     counts:              evidence ? cloneCounts(evidence.counts) : null,

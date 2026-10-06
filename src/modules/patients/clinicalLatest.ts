@@ -8,8 +8,9 @@
 // predicted_at, then id; an unlinked Prediction (no health record) falls back
 // to its predicted_at.
 //
-// Read-path only. R (frozen recordedAt semantics), the S bridge and every
-// write path are untouched. All values are bound parameters ($queryRaw tagged
+// Read-path only. R-BPBC-3 uses measuredAt without legacy fallback; this
+// doctor-facing read model keeps its own documented legacy fallback. The S bridge
+// and write paths are otherwise untouched. All values are bound parameters ($queryRaw tagged
 // templates); timestamps are returned as ISO text so both the native engine
 // and the driver adapter yield identical strings.
 import { Prisma } from '@prisma/client'
@@ -134,7 +135,7 @@ export async function orderPatientIdsByLatestClinical(patientIds: string[]): Pro
   if (patientIds.length === 0) return []
   const rows = await prisma.$queryRaw<Array<{ id: string }>>`
     SELECT pa.id
-    FROM pacientes pa
+    FROM patients pa
     LEFT JOIN LATERAL (
       SELECT max(${SQL_RECORD_EFFECTIVE}) AS m FROM health_records h WHERE h.patient_id = pa.id
     ) l ON true
@@ -219,13 +220,13 @@ export async function orderedClinicalPredictionIds(q: ClinicalPredictionQuery): 
 
 // Predictions whose source record's EFFECTIVE clinical instant lies in
 // [start, end) — dashboard activity counts. Returns the effective instants.
-export async function predictionClinicalInstantsInRange(medicoId: string, start: Date, end: Date): Promise<Date[]> {
+export async function predictionClinicalInstantsInRange(doctorId: string, start: Date, end: Date): Promise<Date[]> {
   const rows = await prisma.$queryRaw<Array<{ at: string }>>`
     SELECT ${ISO(SQL_PREDICTION_EFFECTIVE)} AS at
     FROM predictions p
-    JOIN pacientes pa ON pa.id = p.patient_id
+    JOIN patients pa ON pa.id = p.patient_id
     LEFT JOIN health_records h ON h.id = p.health_record_id
-    WHERE pa.medico_id = ${medicoId} AND pa.is_hidden = false
+    WHERE pa.doctor_id = ${doctorId} AND pa.is_hidden = false
       AND ${SQL_PREDICTION_EFFECTIVE} >= (${start.toISOString()}::timestamptz AT TIME ZONE 'UTC')
       AND ${SQL_PREDICTION_EFFECTIVE} <  (${end.toISOString()}::timestamptz AT TIME ZONE 'UTC')`
   return rows.map(r => new Date(r.at))

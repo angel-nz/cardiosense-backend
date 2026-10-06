@@ -3,7 +3,7 @@
 //
 //   REAL HealthRecords → S clinical order → lifecycle gate → eligibility
 //   (E1–E7) → measured visits → S-CAD-3 interval sequence (NEW S4) →
-//   cumulative target dates → S-FEAT-SEQUENTIAL-ROBUST-1 states (F1 from ALL
+//   cumulative target dates → S-FEAT-SEQUENTIAL-ROBUST-2 states (F1 from ALL
 //   usable REAL records; F2 + in-run F1; F3 + in-run F1, F2) → admissibility
 //   → contiguous horizons → plan + fingerprint
 // Cadence visits (measured, one per clinical day) and the feature history

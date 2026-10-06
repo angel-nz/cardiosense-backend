@@ -31,22 +31,22 @@ export function canonicalDecimal(v: DecimalLike): string {
 export const inModelAgeDomain = (age: number, model: SModelContractInput): boolean =>
   Number.isInteger(age) && age >= model.eligibleAgeRange.min && age <= model.eligibleAgeRange.max
 
-// ── Shared 12-feature check (REAL records and simulated states) ───────────
+// ── Shared 11-feature check (REAL records and simulated states) ───────────
 // Returns null when admissible, otherwise a stable reason:
 //   non_finite:<f> | non_integer:<f> | invalid_sex | out_of_range:<f> | dia_ge_sys
 // (age-domain membership is checked separately by the callers).
-type Twelve = Record<keyof SSimulatedState, number>
+type ModelState = Record<keyof SSimulatedState, number>
 
-const INTEGER_FIELDS: (keyof SSimulatedState)[] = ['age', 'sex', 'currentSmoker', 'cigsPerDay', 'BPMeds', 'diabetes', 'heartRate']
+const INTEGER_FIELDS: (keyof SSimulatedState)[] = ['age', 'sex', 'currentSmoker', 'cigsPerDay', 'BPMeds', 'diabetes']
 const BINARY_FIELDS: (keyof SSimulatedState)[] = ['currentSmoker', 'BPMeds', 'diabetes']
-const FIELD_ORDER: (keyof SSimulatedState)[] = ['age', 'sex', 'currentSmoker', 'cigsPerDay', 'BPMeds', 'diabetes', 'totChol', 'sysBP', 'diaBP', 'BMI', 'heartRate', 'glucose']
+const FIELD_ORDER: (keyof SSimulatedState)[] = ['age', 'sex', 'currentSmoker', 'cigsPerDay', 'BPMeds', 'diabetes', 'totChol', 'sysBP', 'diaBP', 'BMI', 'glucose']
 // CreateRecordDto field name → model-input name
 const DTO_TO_MODEL: Record<string, keyof SSimulatedState> = {
   age: 'age', cigsPerDay: 'cigsPerDay', totChol: 'totChol', sysBP: 'sysBP', diaBP: 'diaBP',
-  bmi: 'BMI', heartRate: 'heartRate', glucose: 'glucose', currentSmoker: 'currentSmoker', bpMeds: 'BPMeds', diabetes: 'diabetes',
+  bmi: 'BMI', glucose: 'glucose', currentSmoker: 'currentSmoker', bpMeds: 'BPMeds', diabetes: 'diabetes',
 }
 
-export function modelInputIssue(x: Twelve): string | null {
+export function modelInputIssue(x: ModelState): string | null {
   for (const f of FIELD_ORDER) {
     const v = x[f]
     if (typeof v !== 'number' || !Number.isFinite(v)) return `non_finite:${f}`
@@ -58,7 +58,7 @@ export function modelInputIssue(x: Twelve): string | null {
     patientId: PLACEHOLDER_UUID,
     age: x.age, currentSmoker: x.currentSmoker === 1, cigsPerDay: x.cigsPerDay,
     bpMeds: x.BPMeds === 1, diabetes: x.diabetes === 1,
-    totChol: x.totChol, sysBP: x.sysBP, diaBP: x.diaBP, bmi: x.BMI, heartRate: x.heartRate, glucose: x.glucose,
+    totChol: x.totChol, sysBP: x.sysBP, diaBP: x.diaBP, bmi: x.BMI, glucose: x.glucose,
   })
   if (!parsed.success) {
     const field = String(parsed.error.errors[0]?.path[0] ?? 'unknown')
@@ -76,7 +76,7 @@ export function recordToModelInput(r: SRealRecordInput, sex: number): Record<key
     currentSmoker: r.currentSmoker ? 1 : 0, cigsPerDay: r.cigsPerDay,
     BPMeds: r.bpMeds ? 1 : 0, diabetes: r.diabetes ? 1 : 0,
     totChol: n(r.totChol), sysBP: n(r.sysBP), diaBP: n(r.diaBP), BMI: n(r.bmi),
-    heartRate: r.heartRate, glucose: n(r.glucose),
+    glucose: n(r.glucose),
   }
 }
 
@@ -94,7 +94,6 @@ export function classifyRecord(r: SRealRecordInput, patientSex: number, model: S
 // Simulated target state admissibility (complete check, every horizon).
 // Age-domain failure is reported distinctly as 'age_out_of_model_domain'.
 export function stateAdmissibilityIssue(s: SSimulatedState, model: SModelContractInput): string | null {
-  const x = s as unknown as Twelve
-  if (typeof x.age === 'number' && Number.isInteger(x.age) && !inModelAgeDomain(x.age, model)) return 'age_out_of_model_domain'
-  return modelInputIssue(x)
+  if (typeof s.age === 'number' && Number.isInteger(s.age) && !inModelAgeDomain(s.age, model)) return 'age_out_of_model_domain'
+  return modelInputIssue(s)
 }

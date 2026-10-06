@@ -40,7 +40,6 @@ export class HealthRecordRepository {
         sysBP:         dto.sysBP,
         diaBP:         dto.diaBP,
         bmi:           dto.bmi,
-        heartRate:     dto.heartRate,
         glucose:       dto.glucose,
         notes:         dto.notes,
         createdBy:     userId,
@@ -82,20 +81,24 @@ export class HealthRecordRepository {
     return prisma.healthRecord.findFirst({ where: { id, patientId } })
   }
 
-  // NEW R (R4B) — causal prior history for personalization evidence.
-  // Patient-scoped IN THE QUERY and strictly before the anchor's recordedAt
-  // (records at the anchor's exact instant are not prior evidence). Ordered by
-  // real time; `id` is only a DB-stability tie-break — the evidence builder
-  // never lets id/row order affect its result. Selects only the fields the
-  // evidence policy needs (no notes, no creator).
-  async findPriorRecordsForPatient(patientId: string, cutoff: Date) {
+  // PRE-T-R1 / R-BPBC-3 — causal prior history for personalization evidence.
+  // measuredAt is the ONLY causal clock. Strictly earlier measured rows are
+  // candidates; measuredAt NULL rows are also fetched so the pure builder can
+  // audit/exclude legacy time explicitly. Equal/future measured rows are not
+  // prior evidence. recordedAt is intentionally absent from both predicate and
+  // selected R payload.
+  async findPriorRecordsForPatient(patientId: string, anchorId: string, cutoff: Date) {
     return prisma.healthRecord.findMany({
-      where:   { patientId, recordedAt: { lt: cutoff } },
-      orderBy: [{ recordedAt: 'asc' }, { id: 'asc' }],
+      where: {
+        patientId,
+        id: { not: anchorId },
+        OR: [{ measuredAt: { lt: cutoff } }, { measuredAt: null }],
+      },
+      orderBy: [{ measuredAt: 'asc' }, { id: 'asc' }],
       select: {
-        id: true, patientId: true, recordedAt: true, age: true, currentSmoker: true,
+        id: true, patientId: true, measuredAt: true, clinicalTimeSource: true, age: true, currentSmoker: true,
         cigsPerDay: true, bpMeds: true, diabetes: true, totChol: true, sysBP: true,
-        diaBP: true, bmi: true, heartRate: true, glucose: true,
+        diaBP: true, bmi: true, glucose: true,
       },
     })
   }

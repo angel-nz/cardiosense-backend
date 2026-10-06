@@ -58,7 +58,7 @@ export class PatientService {
   constructor(private readonly io?: IOServer) {}
 
   async list(userId: string, query: PatientQueryDtoType) {
-    const medico = await this.getMedicoOrThrow(userId)
+    const doctor = await this.getDoctorOrThrow(userId)
     // X2 — `risk` (already validated/coerced to canonical uppercase by
     // PatientQueryDto) is now genuinely forwarded to the repository, which
     // filters dataset-wide, before pagination, on each patient's latest
@@ -68,7 +68,7 @@ export class PatientService {
     // search/risk exactly the same way; hidden patients are excluded
     // unconditionally inside repo.findAll regardless of which status is
     // requested — never something this service layer needs to re-enforce.
-    const { data, total } = await repo.findAll(medico.id, {
+    const { data, total } = await repo.findAll(doctor.id, {
       page:   query.page,
       limit:  query.limit,
       search: query.search,
@@ -80,8 +80,8 @@ export class PatientService {
   }
 
   async getOne(userId: string, patientId: string) {
-    const medico = await this.getMedicoOrThrow(userId)
-    const patient = await repo.findById(patientId, medico.id)
+    const doctor = await this.getDoctorOrThrow(userId)
+    const patient = await repo.findById(patientId, doctor.id)
     if (!patient) throw new NotFoundError('Patient')
     return patient
   }
@@ -94,8 +94,8 @@ export class PatientService {
   // no isActive filter). Payload carries just enough for the receiver to
   // know something changed, not what — canonical refresh is GET /patients.
   async create(userId: string, dto: CreatePatientDtoType) {
-    const medico = await this.getMedicoOrThrow(userId)
-    const patient = await repo.create(medico.id, dto)
+    const doctor = await this.getDoctorOrThrow(userId)
+    const patient = await repo.create(doctor.id, dto)
     this.io?.to(`user:${userId}`).emit('patient_created', {
       patientId: patient.id,
     })
@@ -116,7 +116,7 @@ export class PatientService {
     await alertSvc.createInformationAlert({
       type:         'INFO_PATIENT_CREATED',
       patientId:    patient.id,
-      medicoUserId: userId,
+      doctorUserId: userId,
       patientName:  `${patient.firstName} ${patient.lastName}`,
       message:      'Paciente creado correctamente.',
     })
@@ -193,7 +193,7 @@ export class PatientService {
       await alertSvc.createInformationAlert({
         type:         'INFO_PATIENT_UPDATED',
         patientId:    patient.id,
-        medicoUserId: userId,
+        doctorUserId: userId,
         patientName:  `${patient.firstName} ${patient.lastName}`,
         message:      'Se actualizó la información personal del paciente.',
       })
@@ -265,7 +265,7 @@ export class PatientService {
         const supersededSetId = await supersedeCurrentForLifecycleInTx(tx, patientId, 'PATIENT_LEFT_ACTIVE')
         return { p, supersededSetId }
       })
-      const visible = await prisma.paciente.findUnique({ where: { id: patientId }, select: { isActive: true } })
+      const visible = await prisma.patient.findUnique({ where: { id: patientId }, select: { isActive: true } })
       if (!visible || visible.isActive !== false) throw new TransactionCommitVerificationError('LIFECYCLE_PATIENT_STATE')
       if (res.supersededSetId) {
         await verifyLifecycleSupersessionCommitted(res.supersededSetId)
@@ -287,7 +287,7 @@ export class PatientService {
       await alertSvc.createInformationAlert({
         type:         'INFO_PATIENT_UPDATED',
         patientId:    patient.id,
-        medicoUserId: userId,
+        doctorUserId: userId,
         patientName:  `${patient.firstName} ${patient.lastName}`,
         message:      patient.isActive
           ? 'Se reactivó al paciente.'
@@ -331,8 +331,8 @@ export class PatientService {
   // separate, subsequent PATCH /patients/:id/status call, Z8 §9), isHidden
   // becomes false. No persisted Z5 Alert.
   async show(userId: string, patientId: string) {
-    const medico = await this.getMedicoOrThrow(userId)
-    const patient = await repo.findHiddenById(patientId, medico.id)
+    const doctor = await this.getDoctorOrThrow(userId)
+    const patient = await repo.findHiddenById(patientId, doctor.id)
     if (!patient) throw new NotFoundError('Patient')
     const updated = await repo.setHidden(patientId, false)
     this.emitPatientUpdated(updated)
@@ -344,16 +344,16 @@ export class PatientService {
   // Z8 §19 — PATCH /patients/inactive/visibility, { isHidden }. Bulk
   // hide-all-inactive-visible / show-all-hidden for the current doctor
   // only. repo.bulkSetVisibility already scopes its WHERE to
-  // medicoId + isActive:false + the current opposite isHidden value, so an
+  // doctorId + isActive:false + the current opposite isHidden value, so an
   // ACTIVE patient or another doctor's patient is never touched by
   // construction, not merely by convention. Returns the real affected row
   // count (Z8 §20's ONE ActionNotification quotes this number — the
   // frontend never fabricates or estimates it).
   async bulkSetVisibility(userId: string, isHidden: boolean): Promise<{ affectedCount: number }> {
-    const medico = await this.getMedicoOrThrow(userId)
-    const affectedCount = await repo.bulkSetVisibility(medico.id, isHidden)
+    const doctor = await this.getDoctorOrThrow(userId)
+    const affectedCount = await repo.bulkSetVisibility(doctor.id, isHidden)
     // NEW S2D — defensive: no non-ACTIVE patient of this doctor keeps a CURRENT forecast.
-    scheduleLifecycleReconcile({ medicoId: medico.id }, this.io)
+    scheduleLifecycleReconcile({ doctorId: doctor.id }, this.io)
     return { affectedCount }
   }
 
@@ -363,8 +363,8 @@ export class PatientService {
   // minimal summary shape (no predictions/healthRecords), matching Z8 §17's
   // "do not return clinical records/predictions here" instruction.
   async listHidden(userId: string, opts: HiddenPatientQueryDtoType) {
-    const medico = await this.getMedicoOrThrow(userId)
-    const { data, total } = await repo.findHidden(medico.id, {
+    const doctor = await this.getDoctorOrThrow(userId)
+    const { data, total } = await repo.findHidden(doctor.id, {
       page: opts.page, limit: opts.limit, search: opts.search,
     })
     return paginate(data, total, opts.page, opts.limit)
@@ -376,8 +376,8 @@ export class PatientService {
   // this IS the dedicated visibility-management surface Z8 carves that
   // exception out for (never reused as a Dashboard patient count).
   async getVisibilitySummary(userId: string) {
-    const medico = await this.getMedicoOrThrow(userId)
-    return repo.getVisibilitySummary(medico.id)
+    const doctor = await this.getDoctorOrThrow(userId)
+    return repo.getVisibilitySummary(doctor.id)
   }
 
   async getHistory(userId: string, patientId: string, opts: HistoryQueryDtoType) {
@@ -416,9 +416,9 @@ export class PatientService {
     })
   }
 
-  private async getMedicoOrThrow(userId: string) {
-    const medico = await prisma.medico.findUnique({ where: { userId } })
-    if (!medico) throw new ForbiddenError('Only doctors can access patients')
-    return medico
+  private async getDoctorOrThrow(userId: string) {
+    const doctor = await prisma.doctor.findUnique({ where: { userId } })
+    if (!doctor) throw new ForbiddenError('Only doctors can access patients')
+    return doctor
   }
 }

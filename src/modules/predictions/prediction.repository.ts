@@ -113,21 +113,20 @@ export class PredictionRepository {
     return prisma.prediction.findUnique({ where: { id } })
   }
 
-  // NEW R (R4B) — persisted prediction history for the γ channel. Scoped IN
-  // THE QUERY to the authorized patient, to the given (already causally cut,
-  // patient-owned) HealthRecord ids, and to predictedAt strictly before the
-  // anchor's recordedAt — so a Prediction being created for the anchor (or any
-  // later re-prediction) can never enter its own history. Returns only what
-  // canonical GLOBAL-score selection needs; selection itself (legacy riskScore
-  // vs NEW-R globalRiskScore, version, dedupe) is done by the pure builder.
-  async findGlobalPredictionsForRecords(patientId: string, recordIds: string[], cutoff: Date) {
+  // PRE-T-R1 / R-BPBC-3 — persisted GLOBAL prediction history for the γ
+  // channel. The HealthRecord ids are already clinically cut by measuredAt.
+  // predictedAt is a technical persistence timestamp and MUST NOT become a
+  // second causal clock. The anchor id is never in recordIds, so the current
+  // Prediction cannot feed itself. Historical individualized rows contribute
+  // only globalRiskScore; the pure builder enforces model-version compatibility.
+  async findGlobalPredictionsForRecords(patientId: string, recordIds: string[]) {
     if (recordIds.length === 0) return []
     return prisma.prediction.findMany({
-      where:   { patientId, healthRecordId: { in: recordIds }, predictedAt: { lt: cutoff } },
-      orderBy: [{ predictedAt: 'asc' }, { id: 'asc' }],
+      where:   { patientId, healthRecordId: { in: recordIds } },
+      orderBy: [{ id: 'asc' }],
       select: {
         id: true, patientId: true, healthRecordId: true, riskScore: true, globalRiskScore: true,
-        personalizationStatus: true, modelVersion: true, sexUsed: true, predictedAt: true,
+        personalizationStatus: true, modelVersion: true, sexUsed: true,
       },
     })
   }
@@ -147,7 +146,7 @@ export class PredictionRepository {
   // compose with top-level AND, applied before count/skip/take, so
   // total/totalPages describe the FILTERED collection. `curp` now
   // included in the selected patient fields (needed by the redesigned
-  // page); still scoped strictly inside `medicoId` — a foreign patient can
+  // page); still scoped strictly inside `doctorId` — a foreign patient can
   // never match, search or otherwise.
   // NEW S3 — doctor-facing CLINICAL order (sortBy=clinicalTime) for the
   // patient Prediction history: source record effective clinical time DESC →
@@ -174,10 +173,10 @@ export class PredictionRepository {
   }
 
   // NEW S3 — global history in CLINICAL order (same contract as above).
-  async listAllClinical(medicoId: string, opts: {
+  async listAllClinical(doctorId: string, opts: {
     page: number; limit: number; search?: string; from?: Date; to?: Date; riskLevel?: RiskLevel
   }) {
-    const patientIds = (await prisma.paciente.findMany({ where: this.globalPatientWhere(medicoId, opts.search), select: { id: true } })).map(p => p.id)
+    const patientIds = (await prisma.patient.findMany({ where: this.globalPatientWhere(doctorId, opts.search), select: { id: true } })).map(p => p.id)
     const ordered = await orderedClinicalPredictionIds({ patientIds, riskLevel: opts.riskLevel, from: opts.from, to: opts.to })
     const pageIds = ordered.slice((opts.page - 1) * opts.limit, opts.page * opts.limit)
     const rows = pageIds.length ? await prisma.prediction.findMany({
@@ -188,8 +187,8 @@ export class PredictionRepository {
     return { data: pageIds.map(id => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined), total: ordered.length }
   }
 
-  private globalPatientWhere(medicoId: string, search?: string): Prisma.PacienteWhereInput {
-    const patientWhere: Prisma.PacienteWhereInput = { medicoId, isHidden: false }
+  private globalPatientWhere(doctorId: string, search?: string): Prisma.PatientWhereInput {
+    const patientWhere: Prisma.PatientWhereInput = { doctorId, isHidden: false }
     if (search) {
       const normalized = search.replace(/\s+/g, ' ')
       const tokens = normalized.split(' ').filter(Boolean)
@@ -205,7 +204,7 @@ export class PredictionRepository {
     return patientWhere
   }
 
-  async listAll(medicoId: string, opts: {
+  async listAll(doctorId: string, opts: {
     page: number; limit: number; search?: string; from?: Date; to?: Date; riskLevel?: RiskLevel
   }) {
     const { page, limit, search, from, to, riskLevel } = opts
@@ -215,7 +214,7 @@ export class PredictionRepository {
     // patients' predictions exactly like every other normal operational
     // surface (no isActive restriction here — an INACTIVE_VISIBLE patient's
     // predictions remain part of this history).
-    const patientWhere: Prisma.PacienteWhereInput = { medicoId, isHidden: false }
+    const patientWhere: Prisma.PatientWhereInput = { doctorId, isHidden: false }
     if (search) {
       // Collapse repeated internal whitespace (already trimmed by the DTO).
       const normalized = search.replace(/\s+/g, ' ')
@@ -266,9 +265,9 @@ export class PredictionRepository {
 
   // Z8 §26 — isHidden=false added to the patient relation filter, same
   // hidden-exclusion as listAll() above.
-  async findByIdForMedico(id: string, medicoId: string) {
+  async findByIdForDoctor(id: string, doctorId: string) {
     return prisma.prediction.findFirst({
-      where: { id, patient: { medicoId, isHidden: false } },
+      where: { id, patient: { doctorId, isHidden: false } },
     })
   }
 

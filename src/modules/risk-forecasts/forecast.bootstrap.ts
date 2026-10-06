@@ -25,7 +25,7 @@ const KEYS = ['patientsScanned', 'activeVisible', 'inactive', 'hidden', 'invalid
 export async function runForecastBootstrap(opts: { apply: boolean; patientIds?: string[] }): Promise<BootstrapReport> {
   const counts: Record<string, number> = Object.fromEntries(KEYS.map(k => [k, 0]))
   const patients: BootstrapReport['patients'] = []
-  const universe = await prisma.paciente.findMany({
+  const universe = await prisma.patient.findMany({
     where: opts.patientIds ? { id: { in: opts.patientIds } } : {},
     select: { id: true, isActive: true, isHidden: true }, orderBy: { id: 'asc' },
   })

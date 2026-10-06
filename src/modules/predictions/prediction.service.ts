@@ -103,7 +103,7 @@ export interface AutomaticFinalizeInput {
   alertPlan:    { severity: 'CRITICAL' | 'WARNING'; message: string; realtimeCategory: RealtimeAlertCategory } | null
   patient:      { id: string; firstName: string; lastName: string }
   healthRecordId: string
-  medicoUserId: string
+  doctorUserId: string
   riskScore:    number
   riskLevel:    'low' | 'moderate' | 'high'
   isAnomaly:    boolean
@@ -112,12 +112,12 @@ export interface AutomaticFinalizeInput {
 // NEW S4 — inputs of the canonical automatic-Prediction core. The patient and
 // record are already resolved by the caller (HTTP-era gate below, or the
 // durable worker, which deliberately does NOT re-apply the active/hidden
-// gates to an ALREADY ACCEPTED record — S4 §14). `medicoUserId` is the owning
+// gates to an ALREADY ACCEPTED record — S4 §14). `doctorUserId` is the owning
 // doctor's user id (socket rooms, Alert notification).
 export interface AutomaticPredictionCoreInput {
-  patient:      Awaited<ReturnType<typeof prisma.paciente.findFirst>> & object
+  patient:      Awaited<ReturnType<typeof prisma.patient.findFirst>> & object
   record:       NonNullable<Awaited<ReturnType<HealthRecordRepository['findByIdForPatient']>>>
-  medicoUserId: string
+  doctorUserId: string
 }
 
 export class PredictionService {
@@ -133,14 +133,14 @@ export class PredictionService {
   async predictFromHealthRecord(userId: string, ref: AutomaticPredictionRef) {
     const dto = ref
     const origin = AUTOMATIC_PREDICTION_ORIGIN
-    const medico = await this.getMedicoOrThrow(userId)
+    const doctor = await this.getDoctorOrThrow(userId)
 
     // Verify patient ownership. Z8 §26/§29 — isHidden=true is excluded here
     // so a hidden patient behaves exactly like a nonexistent one (no
     // "exists but hidden" leak) for the automatic (HealthRecordService-
     // triggered) path — the only caller since S2E-FIX4.
-    const patient = await prisma.paciente.findFirst({
-      where: { id: dto.patientId, medicoId: medico.id, isHidden: false },
+    const patient = await prisma.patient.findFirst({
+      where: { id: dto.patientId, doctorId: doctor.id, isHidden: false },
     })
     if (!patient) throw new NotFoundError('Patient')
 
@@ -169,7 +169,7 @@ export class PredictionService {
     // silently reintroduce cross-patient predictions.
     if (record.patientId !== patient.id) throw new NotFoundError('Health record — please create one first')
 
-    return this.scoreAndPersistAutomatic({ patient, record, medicoUserId: userId })
+    return this.scoreAndPersistAutomatic({ patient, record, doctorUserId: userId })
   }
 
   // NEW S4 — the ONE canonical automatic scoring + persistence core (moved
@@ -179,7 +179,7 @@ export class PredictionService {
   // persisted fields are unchanged. Called by predictFromHealthRecord (gated)
   // and by the durable automatic-Prediction worker.
   async scoreAndPersistAutomatic(input: AutomaticPredictionCoreInput) {
-    const { patient, record, medicoUserId: userId } = input
+    const { patient, record, doctorUserId: userId } = input
     const dto = { patientId: patient.id, healthRecordId: record.id }
     const origin = AUTOMATIC_PREDICTION_ORIGIN
 
@@ -245,7 +245,7 @@ export class PredictionService {
 
     const outcome = resolvePersonalizationOutcome({
       global:             ai.global,
-      anchorRecordedAt:   record.recordedAt,
+      anchorMeasuredAt:   record.measuredAt,
       evidence,
       personalizationRaw: ai.personalizationRaw,
     })
@@ -351,7 +351,7 @@ export class PredictionService {
         alertPlan,
         patient:      { id: patient.id, firstName: patient.firstName, lastName: patient.lastName },
         healthRecordId: record.id,
-        medicoUserId: userId,
+        doctorUserId: userId,
         riskScore:    outcome.finalRiskScore,
         riskLevel:    outcome.finalRiskLevel,
         isAnomaly:    ai.global.isAnomaly,
@@ -386,12 +386,12 @@ export class PredictionService {
   // delivery is never promised. Each socket effect stays best-effort (an
   // emission failure never undoes committed rows — accepted pre-S4 contract).
   async finalizeAutomaticPrediction(input: AutomaticFinalizeInput): Promise<void> {
-    const { prediction, alert, alertPlan, patient, medicoUserId: userId } = input
+    const { prediction, alert, alertPlan, patient, doctorUserId: userId } = input
     if (alert && alertPlan) {
       try {
         await new AlertService(this.io).notifyPredictionAlertCreated(alert, {
           patientId: patient.id, predictionId: prediction.id, severity: alertPlan.severity,
-          message: alertPlan.message, medicoUserId: userId, patientName: `${patient.firstName} ${patient.lastName}`,
+          message: alertPlan.message, doctorUserId: userId, patientName: `${patient.firstName} ${patient.lastName}`,
           riskScore: input.riskScore, realtimeCategory: alertPlan.realtimeCategory,
         })
       } catch (err) {
@@ -440,7 +440,7 @@ export class PredictionService {
     patient: { id: string; firstName: string; lastName: string }
     healthRecordId: string
     predictionId: string
-    medicoUserId: string
+    doctorUserId: string
   }): Promise<void> {
     const p = await prisma.prediction.findUnique({ where: { id: input.predictionId } })
     if (!p || p.patientId !== input.patient.id || p.healthRecordId !== input.healthRecordId || p.origin !== AUTOMATIC_PREDICTION_ORIGIN) {
@@ -466,18 +466,18 @@ export class PredictionService {
     }
     await this.finalizeAutomaticPrediction({
       prediction: { id: p.id, predictedAt: p.predictedAt }, alert, alertPlan,
-      patient: input.patient, healthRecordId: p.healthRecordId as string, medicoUserId: input.medicoUserId,
+      patient: input.patient, healthRecordId: p.healthRecordId as string, doctorUserId: input.doctorUserId,
       riskScore, riskLevel: p.riskLevel.toLowerCase() as AutomaticFinalizeInput['riskLevel'], isAnomaly: p.isAnomaly,
     })
   }
 
   async listByPatient(userId: string, patientId: string, opts: PatientPredictionQueryDtoType) {
-    const medico = await this.getMedicoOrThrow(userId)
+    const doctor = await this.getDoctorOrThrow(userId)
     // Z8 §26/§33 — read-only path: isHidden=true excluded (same as predictFromHealthRecord()
     // above), but NO isActive check — an INACTIVE_VISIBLE patient's existing
     // prediction history must remain fully browsable.
-    const patient = await prisma.paciente.findFirst({
-      where: { id: patientId, medicoId: medico.id, isHidden: false },
+    const patient = await prisma.patient.findFirst({
+      where: { id: patientId, doctorId: doctor.id, isHidden: false },
     })
     if (!patient) throw new NotFoundError('Patient')
 
@@ -489,21 +489,21 @@ export class PredictionService {
   }
 
   async listAll(userId: string, opts: GlobalPredictionQueryDtoType) {
-    const medico = await this.getMedicoOrThrow(userId)
-    const { data, total } = opts.sortBy === 'clinicalTime' ? await repo.listAllClinical(medico.id, opts) : await repo.listAll(medico.id, opts)
+    const doctor = await this.getDoctorOrThrow(userId)
+    const { data, total } = opts.sortBy === 'clinicalTime' ? await repo.listAllClinical(doctor.id, opts) : await repo.listAll(doctor.id, opts)
     return paginate(data.map(toPredictionListItem), total, opts.page, opts.limit)
   }
 
   async getOne(userId: string, predictionId: string) {
-    const medico = await this.getMedicoOrThrow(userId)
-    const prediction = await repo.findByIdForMedico(predictionId, medico.id)
+    const doctor = await this.getDoctorOrThrow(userId)
+    const prediction = await repo.findByIdForDoctor(predictionId, doctor.id)
     if (!prediction) throw new NotFoundError('Prediction')
     return toPredictionDetail(prediction)   // R4F detail contract
   }
 
-  private async getMedicoOrThrow(userId: string) {
-    const medico = await prisma.medico.findUnique({ where: { userId } })
-    if (!medico) throw new ForbiddenError('Only doctors can access predictions')
-    return medico
+  private async getDoctorOrThrow(userId: string) {
+    const doctor = await prisma.doctor.findUnique({ where: { userId } })
+    if (!doctor) throw new ForbiddenError('Only doctors can access predictions')
+    return doctor
   }
 }
