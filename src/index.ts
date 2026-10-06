@@ -104,8 +104,8 @@ async function bootstrap() {
 
   // Start listening
   const port = parseInt(env.PORT, 10)
-  httpServer.listen(port, () => {
-    logger.info(`🚀 CardioSense API running on port ${port} [${env.NODE_ENV}]`)
+  httpServer.listen(port, '0.0.0.0', () => {
+    logger.info(`🚀 CardioSense API running on 0.0.0.0:${port} [${env.NODE_ENV}]`)
     logger.info(`   Health: http://localhost:${port}/health`)
     logger.info(`   API:    http://localhost:${port}/api`)
   })

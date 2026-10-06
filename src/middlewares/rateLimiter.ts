@@ -2,6 +2,7 @@ import rateLimit from 'express-rate-limit'
 import type { Request } from 'express'
 import type { AuthRequest } from '@/types'
 import { verifyAccessToken } from '@/lib/jwt'
+import { rateLimitClientIp } from '@/middlewares/rateLimitClientIp'
 
 export const GENERAL_API_WINDOW_MS = 15 * 60 * 1000
 export const GENERAL_API_MAX = 2000
@@ -29,7 +30,7 @@ export function generalApiRateLimitKey(req: Request): string {
     }
   }
 
-  return `ip:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`
+  return `ip:${rateLimitClientIp(req)}`
 }
 
 export const apiLimiter = rateLimit({
@@ -44,6 +45,7 @@ export const apiLimiter = rateLimit({
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
+  keyGenerator: rateLimitClientIp,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many authentication attempts.', code: 'RATE_LIMITED' },
@@ -64,6 +66,7 @@ export const authLimiter = rateLimit({
 export const passwordChangeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
+  keyGenerator: rateLimitClientIp,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many password change attempts.', code: 'RATE_LIMITED' },
@@ -80,13 +83,14 @@ export const passwordChangeLimiter = rateLimit({
 // `req.user` is always populated by the time this limiter runs, and keying
 // by IP here would incorrectly lump every authenticated user behind the same
 // NAT/proxy/office IP into one shared bucket. Keyed by `req.user.sub`
-// instead, with `req.ip` kept only as a defensive fallback that should never
-// actually be reached given the required authenticate → limiter ordering.
+// instead, with the canonical deployment-aware client IP kept only as a
+// defensive fallback that should never actually be reached given the required
+// authenticate → limiter ordering.
 export const avatarUploadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => (req as AuthRequest).user?.sub ?? req.ip ?? 'unknown',
+  keyGenerator: (req) => (req as AuthRequest).user?.sub ?? rateLimitClientIp(req),
   message: { error: 'Too many avatar upload attempts.', code: 'RATE_LIMITED' },
 })

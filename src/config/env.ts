@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { z } from 'zod'
+import { validateProductionDeploymentEnvironment } from '@/config/deploymentEnvironment'
 
 const envSchema = z.object({
   NODE_ENV:          z.enum(['development', 'production', 'test']).default('development'),
@@ -20,6 +21,15 @@ const parsed = envSchema.safeParse(process.env)
 if (!parsed.success) {
   console.error('❌ Invalid environment variables:')
   console.error(parsed.error.flatten().fieldErrors)
+  process.exit(1)
+}
+
+const deploymentIssues = validateProductionDeploymentEnvironment(process.env)
+if (deploymentIssues.length > 0) {
+  console.error('❌ Invalid production deployment environment:')
+  for (const issue of deploymentIssues) {
+    console.error(`- ${issue.field}: ${issue.message}`)
+  }
   process.exit(1)
 }
 

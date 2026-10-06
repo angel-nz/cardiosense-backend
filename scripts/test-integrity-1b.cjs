@@ -157,5 +157,8 @@ test('INTEGRITY-1A limiter policy remains unchanged by INTEGRITY-1B', () => {
   const limiter = read('src/middlewares/rateLimiter.ts')
   assert.match(limiter, /GENERAL_API_MAX\s*=\s*2000/)
   assert.match(limiter, /return `user:\$\{payload\.sub\}`/)
-  assert.match(limiter, /return `ip:\$\{req\.ip \?\?/)
+  // DEPLOY-BACKEND-PREP-FIX-1 strengthens only the IP identity source behind
+  // Render; INTEGRITY-1A's valid-JWT user bucket and finite fallback bucket
+  // remain intact.
+  assert.match(limiter, /return `ip:\$\{rateLimitClientIp\(req\)\}`/)
 })

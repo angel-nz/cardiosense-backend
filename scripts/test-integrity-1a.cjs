@@ -54,7 +54,8 @@ test('general limiter keys a valid Bearer token by user sub without session look
 
 test('missing or invalid access token falls back to an IP bucket instead of bypassing/erroring', () => {
   assert.match(limiter, /catch\s*\{[\s\S]*?\}/)
-  assert.match(limiter, /return `ip:\$\{req\.ip \?\? req\.socket\.remoteAddress \?\? 'unknown'\}`/)
+  assert.match(limiter, /return `ip:\$\{rateLimitClientIp\(req\)\}`/)
+  assert.match(limiter, /import \{ rateLimitClientIp \} from '@\/middlewares\/rateLimitClientIp'/)
   assert.doesNotMatch(limiter, /skipSuccessfulRequests\s*:\s*true/)
 })
 
@@ -130,6 +131,7 @@ test('actual compiled key generator separates valid users and safely falls back 
     require(request) {
       if (request === 'express-rate-limit') return rateLimitStub
       if (request === '@/lib/jwt') return { verifyAccessToken }
+      if (request === '@/middlewares/rateLimitClientIp') return { rateLimitClientIp: req => req.ip ?? req.socket.remoteAddress ?? 'unknown' }
       throw new Error(`Unexpected runtime require in rateLimiter test: ${request}`)
     },
   }

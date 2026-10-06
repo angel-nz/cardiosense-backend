@@ -24,6 +24,11 @@ import { createRiskForecastRouter } from '@/modules/risk-forecasts/forecast.rout
 export function createApp(io?: IOServer) {
   const app = express()
 
+  // DEPLOY-BACKEND-PREP-FIX-1 — do not make security-sensitive client-IP
+  // identity depend on Express proxy hop counts. Rate limiters use the
+  // Render-aware canonical helper instead; ordinary local req.ip semantics
+  // therefore remain direct/untrusted-forward-header semantics.
+
   // ─── Security headers ───────────────────────────────────────────
   app.use(helmet())
 
