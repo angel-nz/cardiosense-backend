@@ -74,6 +74,8 @@ export class PatientService {
       search: query.search,
       risk:   query.risk,
       status: query.status,
+      sortBy:    query.sortBy,
+      sortOrder: query.sortOrder,
     })
     // NEW S3 — latestClinicalAt + clinically latest Prediction (current risk).
     return paginate(await withClinicalLatest(data), total, query.page, query.limit)

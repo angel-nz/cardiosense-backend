@@ -1,5 +1,7 @@
 import { prisma } from '@/config/prisma'
 import { currentPredictionsOfLatestClinicalRecord, orderPatientIdsByLatestClinical } from './clinicalLatest'
+import { personSearchWhere } from '@/lib/personSearch'
+import { orderIdsByNumericKey, patientAgeOn, riskScoreValue, type PatientSortBy, type PatientSortOrder } from './patientSort'
 import type { CreatePatientDtoType, UpdatePatientDtoType } from './patient.dto'
 import type { RiskLevel, Prisma } from '@prisma/client'
 
@@ -47,8 +49,14 @@ export class PatientRepository {
   // predicate as result rows").
   async findAll(doctorId: string, opts: {
     page: number; limit: number; search?: string; risk?: RiskLevel; status: PatientStatusFilter
+    // SORT-SEARCH-STICKY-FIX-1 — optional dataset-wide ordering. Omitted
+    // keeps the established default (latest clinical time DESC).
+    sortBy?: PatientSortBy; sortOrder?: PatientSortOrder
+    // Injectable only so tests can pin "today"; production always uses now.
+    now?: Date
   }) {
-    const { page, limit, search, risk, status } = opts
+    const { page, limit, search, risk, status, sortBy, sortOrder } = opts
+    const now = opts.now ?? new Date()
     const skip = (page - 1) * limit
 
     const baseWhere: Prisma.PatientWhereInput = {
@@ -59,13 +67,10 @@ export class PatientRepository {
       // status === 'ALL' adds no isActive predicate at all — active AND
       // inactive-visible rows both match, hidden rows never do (isHidden:
       // false above already excludes them unconditionally).
-      ...(search && {
-        OR: [
-          { firstName: { contains: search, mode: 'insensitive' as const } },
-          { lastName:  { contains: search, mode: 'insensitive' as const } },
-          { curp:      { contains: search, mode: 'insensitive' as const } },
-        ],
-      }),
+      // FIX-3 — shared person-search strategy (lib/personSearch.ts): every
+      // term must match first OR last name (so "Juan Pérez" finds "Juan
+      // Carlos Pérez López"), or the whole text is a CURP fragment.
+      ...personSearchWhere(search),
     }
 
     // NEW S3 — clinical-time-first: "current risk" = the Prediction of the
@@ -79,7 +84,24 @@ export class PatientRepository {
       const latest = await currentPredictionsOfLatestClinicalRecord(ids)
       ids = ids.filter(id => latest.get(id)?.riskLevel === risk)
     }
-    const ordered = await orderPatientIdsByLatestClinical(ids)
+    let ordered = await orderPatientIdsByLatestClinical(ids)
+    // FIX-1 / FIX-2 — age / current-risk-percentage ordering over the WHOLE
+    // filtered set, before pagination. The default clinical order above is
+    // the deterministic tie-breaker (see patientSort.ts).
+    if (sortBy === 'age' || sortBy === 'risk') {
+      const dir: PatientSortOrder = sortOrder ?? 'asc'
+      if (sortBy === 'age') {
+        const births = await prisma.patient.findMany({ where: { id: { in: ordered } }, select: { id: true, birthDate: true } })
+        const ageById = new Map(births.map(b => [b.id, patientAgeOn(b.birthDate, now)]))
+        ordered = orderIdsByNumericKey(ordered, id => ageById.get(id) ?? null, dir)
+      } else {
+        // Strict "current risk" (same read model the badge shows): the
+        // Prediction of the exact clinically latest record; none ⇒ no score
+        // ⇒ last. The Decimal(5,4) riskScore is compared numerically.
+        const current = await currentPredictionsOfLatestClinicalRecord(ordered)
+        ordered = orderIdsByNumericKey(ordered, id => riskScoreValue(current.get(id)?.riskScore), dir)
+      }
+    }
     const pageIds = ordered.slice(skip, skip + limit)
     const rows = pageIds.length ? await prisma.patient.findMany({ where: { id: { in: pageIds } } }) : []
     const byId = new Map(rows.map(r => [r.id, r]))
@@ -218,13 +240,8 @@ export class PatientRepository {
       doctorId,
       isActive: false,
       isHidden: true,
-      ...(search && {
-        OR: [
-          { firstName: { contains: search, mode: 'insensitive' as const } },
-          { lastName:  { contains: search, mode: 'insensitive' as const } },
-          { curp:      { contains: search, mode: 'insensitive' as const } },
-        ],
-      }),
+      // FIX-3 — same shared person-search strategy as findAll().
+      ...personSearchWhere(search),
     }
 
     const [data, total] = await prisma.$transaction([

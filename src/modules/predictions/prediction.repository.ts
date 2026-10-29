@@ -1,3 +1,4 @@
+import { personSearchWhere } from '@/lib/personSearch'
 import { prisma } from '@/config/prisma'
 import type { RiskLevel, Prisma, PersonalizationStatus, PredictionOrigin } from '@prisma/client'
 import { orderedClinicalPredictionIds } from '@/modules/patients/clinicalLatest'
@@ -189,18 +190,8 @@ export class PredictionRepository {
 
   private globalPatientWhere(doctorId: string, search?: string): Prisma.PatientWhereInput {
     const patientWhere: Prisma.PatientWhereInput = { doctorId, isHidden: false }
-    if (search) {
-      const normalized = search.replace(/\s+/g, ' ')
-      const tokens = normalized.split(' ').filter(Boolean)
-      const curpCandidate = normalized.toUpperCase()
-      patientWhere.OR = [
-        { AND: tokens.map(token => ({ OR: [
-          { firstName: { contains: token, mode: 'insensitive' as const } },
-          { lastName:  { contains: token, mode: 'insensitive' as const } },
-        ] })) },
-        { curp: { contains: curpCandidate } },
-      ]
-    }
+    // FIX-3 — shared person-search strategy (lib/personSearch.ts).
+    Object.assign(patientWhere, personSearchWhere(search))
     return patientWhere
   }
 
@@ -215,23 +206,8 @@ export class PredictionRepository {
     // surface (no isActive restriction here — an INACTIVE_VISIBLE patient's
     // predictions remain part of this history).
     const patientWhere: Prisma.PatientWhereInput = { doctorId, isHidden: false }
-    if (search) {
-      // Collapse repeated internal whitespace (already trimmed by the DTO).
-      const normalized = search.replace(/\s+/g, ' ')
-      const tokens = normalized.split(' ').filter(Boolean)
-      const curpCandidate = normalized.toUpperCase()
-      patientWhere.OR = [
-        {
-          AND: tokens.map(token => ({
-            OR: [
-              { firstName: { contains: token, mode: 'insensitive' as const } },
-              { lastName:  { contains: token, mode: 'insensitive' as const } },
-            ],
-          })),
-        },
-        { curp: { contains: curpCandidate } },
-      ]
-    }
+    // FIX-3 — shared person-search strategy (lib/personSearch.ts).
+    Object.assign(patientWhere, personSearchWhere(search))
 
     const where = {
       patient: patientWhere,

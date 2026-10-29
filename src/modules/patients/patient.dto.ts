@@ -131,6 +131,12 @@ export const PatientQueryDto = z.object({
   search: z.string().optional(),
   risk:   z.enum(['LOW', 'MODERATE', 'HIGH']).optional(),
   status: PatientStatusFilter,
+  // SORT-SEARCH-STICKY-FIX-1 — dataset-wide numeric ordering, applied to the
+  // whole filtered set BEFORE pagination (closed enum — never interpolated).
+  // Omitted ⇒ the established default (latest clinical time DESC). Missing
+  // age / no current risk score are always last, in both directions.
+  sortBy:    z.enum(['age', 'risk']).optional(),
+  sortOrder: z.enum(['asc', 'desc']).default('asc'),
 })
 
 export const PatientParamDto = z.object({

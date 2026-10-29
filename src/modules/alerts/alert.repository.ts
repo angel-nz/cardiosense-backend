@@ -1,3 +1,4 @@
+import { personSearchWhere, normalizeSearchText } from '@/lib/personSearch'
 import { prisma } from '@/config/prisma'
 import type { AlertSeverity, AlertType, Prisma } from '@prisma/client'
 
@@ -69,23 +70,15 @@ export class AlertRepository {
 
     let searchOr: Prisma.AlertWhereInput[] | undefined
     if (search) {
-      const normalized = search.replace(/\s+/g, ' ')
-      const tokens = normalized.split(' ').filter(Boolean)
-      const curpCandidate = normalized.toUpperCase()
-      searchOr = [
-        {
-          patient: {
-            AND: tokens.map(token => ({
-              OR: [
-                { firstName: { contains: token, mode: 'insensitive' as const } },
-                { lastName:  { contains: token, mode: 'insensitive' as const } },
-              ],
-            })),
-          },
-        },
-        { patient: { curp: { contains: curpCandidate } } },
-        { message: { contains: normalized, mode: 'insensitive' as const } },
-      ]
+      // FIX-3 — name/CURP branches come from the shared person-search
+      // strategy (lib/personSearch.ts); the Alerts-only message branch stays.
+      const patientSearch = personSearchWhere(search)
+      if (patientSearch) {
+        searchOr = [
+          { patient: patientSearch },
+          { message: { contains: normalizeSearchText(search), mode: 'insensitive' as const } },
+        ]
+      }
     }
 
     // Z5 — composed as an explicit top-level AND array (rather than the
